@@ -65,7 +65,17 @@ class DataFetcher:
         Возвращает DataFrame со свечами (индекс - datetime, колонки open, high, low, close, volume).
         """
         self._respect_rate_limits()
-        target_symbol = symbol if symbol else self.symbol
+        raw_symbol = symbol if symbol else self.symbol
+
+        # Автоматический маппинг символов на бесплатные тикеры Twelve Data
+        ticker_map = {
+            "XAG/USD": "SLV",
+            "XAGUSD": "SLV",
+            "TECH100": "QQQ",
+            "NAS100": "QQQ",
+            "BRENT": "BNO"
+        }
+        target_symbol = ticker_map.get(raw_symbol, raw_symbol)
 
         url = f"{BASE_URL}/time_series"
         params = {
@@ -100,7 +110,7 @@ class DataFetcher:
 
             values = data.get("values", [])
             if not values:
-                logger.warning("Twelve Data вернула пустой список свечей.")
+                logger.warning(f"Twelve Data вернула пустой список свечей для {target_symbol}.")
                 return pd.DataFrame()
 
             # Преобразование в DataFrame
@@ -119,7 +129,7 @@ class DataFetcher:
             else:
                 df["volume"] = 0.0
 
-            logger.info(f"Успешно получено {len(df)} свечей для {self.symbol} ({self.interval}). Последняя: {df.index[-1]}")
+            logger.info(f"Успешно получено {len(df)} свечей для {raw_symbol} ({self.interval}). Последняя: {df.index[-1]}")
             return df
 
         except requests.RequestException as e:
