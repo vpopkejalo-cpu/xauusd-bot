@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: xauusd-trading-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.12
+      - key: SYMBOL
+        value: XAU/USD
+      - key: TIMEFRAME
+        value: 15min
+      - key: MIN_PROBABILITY
+        value: "0.60"
+      - key: FILTER_ASIAN_SESSION
+        value: "true"
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
