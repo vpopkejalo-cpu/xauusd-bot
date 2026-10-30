@@ -176,6 +176,28 @@ def update_signal_status(signal_id: int, status: str, exit_price: float, pnl: fl
         conn.commit()
 
 
+def close_all_open_signals(reason: str = "MANUAL_RESET") -> int:
+    """Закрывает все незакрытые сигналы, чтобы разблокировать поиск новых точек входа."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE signals
+            SET status = ?, closed_at = ?
+            WHERE status = 'OPEN'
+        """, (reason, datetime.utcnow().isoformat()))
+        conn.commit()
+        return cursor.rowcount
+
+
+def get_signal_by_id(signal_id: int) -> Optional[Dict[str, Any]]:
+    """Возвращает информацию о сигнале по ID."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM signals WHERE id = ?", (signal_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
 def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
     """Записывает результат сессии переобучения модели."""
     with get_connection() as conn:

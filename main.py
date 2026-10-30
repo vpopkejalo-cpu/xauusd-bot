@@ -95,6 +95,7 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 def check_active_trades(current_candle, notifier: TelegramNotifier):
     """
     Проверяет все открытые сигналы на предмет достижения Take Profit или Stop Loss.
+    Также закрывает устаревшие сделки (старше 4 часов), чтобы не блокировать бота.
     """
     open_signals = get_open_signals()
     if not open_signals:
@@ -103,6 +104,7 @@ def check_active_trades(current_candle, notifier: TelegramNotifier):
     high = float(current_candle["high"])
     low = float(current_candle["low"])
     close = float(current_candle["close"])
+    now_utc = datetime.utcnow()
 
     for sig in open_signals:
         sig_id = sig["id"]
@@ -110,6 +112,18 @@ def check_active_trades(current_candle, notifier: TelegramNotifier):
         entry = float(sig["entry_price"])
         tp = float(sig["take_profit"])
         sl = float(sig["stop_loss"])
+
+        # Автоматическое закрытие сделок старше 4 часов
+        try:
+            created_dt = datetime.fromisoformat(sig["created_at"])
+            age_hours = (now_utc - created_dt).total_seconds() / 3600.0
+            if age_hours >= 4.0:
+                logger.info(f"Сделка #{sig_id} ({direction}) открыта более 4 часов. Автоматически закрываем (EXPIRED).")
+                update_signal_status(sig_id, "EXPIRED", close, close - entry if direction == "BUY" else entry - close)
+                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({direction}) снят с отслеживания (прошло 4 часа).</b>\nБот готов к поиску новых сделок.")
+                continue
+        except Exception as e:
+            logger.warning(f"Ошибка проверки возраста сделки #{sig_id}: {e}")
 
         status = None
         exit_price = None
@@ -164,25 +178,27 @@ def main():
     ml_model = TradingMLModel()
     notifier = TelegramNotifier()
 
+    # Запуск фонового слушателя кнопок Telegram
+    notifier.start_polling()
+
     # 5. Отправка тестового стартового уведомления в Telegram
     try:
         notifier.send_startup_notification(interval=TIMEFRAME, min_prob=MIN_PROBABILITY)
     except Exception as e:
         logger.error(f"Не удалось отправить приветственное сообщение в Telegram: {e}")
 
-    # 5. Первоначальная загрузка исторических данных и обучение модели
-    logger.info("Загрузка начальных рыночных данных для инициализации...")
+    # 6. Первоначальная загрузка исторических данных и обучение модели (500 свечей для надежности)
+    logger.info("Загрузка расширенных рыночных данных (500 свечей) для обучения...")
     try:
-        candles_df = fetcher.fetch_time_series(outputsize=150)
+        candles_df = fetcher.fetch_time_series(outputsize=500)
         if not candles_df.empty:
             save_candles(candles_df)
             candles_with_indicators = calculate_indicators(candles_df, atr_period=ATR_PERIOD)
             
-            # Если модель еще не обучена, обучаем ее на полученных исторических данных
-            if not ml_model.is_trained:
-                logger.info("Модель не найдена на диске. Выполняем первичное обучение...")
-                if ml_model.train(candles_with_indicators):
-                    notifier.send_retrain_notification(len(candles_with_indicators), ml_model.last_accuracy)
+            # Обучаем модель на расширенной выборке
+            logger.info("Выполняем обучение ML модели на расширенной истории...")
+            if ml_model.train(candles_with_indicators):
+                notifier.send_retrain_notification(len(candles_with_indicators), ml_model.last_accuracy)
     except Exception as e:
         logger.error(f"Ошибка при начальной загрузке данных: {e}", exc_info=True)
 
@@ -191,7 +207,7 @@ def main():
 
     logger.info(f"Основной цикл запущен. Интервал опроса: {POLL_INTERVAL_SECONDS} сек. 24/7.")
 
-    # 6. Основной бесконечный цикл
+    # 7. Основной бесконечный цикл
     while running:
         try:
             now_utc = datetime.now(timezone.utc)
@@ -204,7 +220,7 @@ def main():
                 continue
 
             # Получаем свежие свечи через Twelve Data API
-            df = fetcher.fetch_time_series(outputsize=80)
+            df = fetcher.fetch_time_series(outputsize=100)
             if df.empty:
                 logger.warning("Получен пустой датасет, пропускаем итерацию.")
                 time.sleep(POLL_INTERVAL_SECONDS)
@@ -236,6 +252,18 @@ def main():
 
                     logger.info(f"ML Решение: {action} (вероятность {prob:.1%}) - {reason}")
 
+                    # ТРЕНДОВЫЙ ФИЛЬТР (EMA 50): исключает опасные входы против старшего тренда
+                    if action in ("BUY", "SELL"):
+                        close_p = float(latest_candle["close"])
+                        ema_50 = float(latest_candle.get("ema_50", close_p))
+
+                        if action == "BUY" and close_p < ema_50:
+                            logger.info(f"Сигнал BUY отфильтрован трендовым фильтром: цена {close_p:.2f} ниже EMA50 {ema_50:.2f} (нисходящий тренд).")
+                            action = "HOLD"
+                        elif action == "SELL" and close_p > ema_50:
+                            logger.info(f"Сигнал SELL отфильтрован трендовым фильтром: цена {close_p:.2f} выше EMA50 {ema_50:.2f} (восходящий тренд).")
+                            action = "HOLD"
+
                     if action in ("BUY", "SELL"):
                         # Проверяем, нет ли уже активной сделки в том же направлении
                         active_signals = get_open_signals()
@@ -264,8 +292,9 @@ def main():
 
                             logger.info(f"Сформирован сигнал #{sig_id}: {action} по {entry_price:.2f}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
 
-                            # Отправляем форматированное сообщение в Telegram
+                            # Отправляем форматированное сообщение в Telegram с кнопками
                             notifier.send_trade_signal(
+                                signal_id=sig_id,
                                 direction=action,
                                 entry_price=levels["entry_price"],
                                 stop_loss=levels["stop_loss"],
