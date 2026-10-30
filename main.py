@@ -123,15 +123,15 @@ def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Opti
         tp = float(sig["take_profit"])
         sl = float(sig["stop_loss"])
 
-        # Автоматическое закрытие сделок старше 4 часов
+        # Автоматическое закрытие сделок старше 1 часа (для динамичной внутридневной торговли)
         try:
             created_dt = datetime.fromisoformat(sig["created_at"])
             age_hours = (now_utc - created_dt).total_seconds() / 3600.0
-            if age_hours >= 4.0:
-                logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) открыта более 4 часов. Автоматически закрываем (EXPIRED).")
+            if age_hours >= 1.0:
+                logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) открыта более 1 часа. Автоматически закрываем (EXPIRED).")
                 pnl = (close - entry) if direction == "BUY" else (entry - close)
                 update_signal_status(sig_id, "EXPIRED", close, pnl)
-                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({sig_symbol} {direction}) снят с отслеживания (прошло 4 часа).</b>\nБот готов к поиску новых сделок.")
+                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({sig_symbol} {direction}) снят с отслеживания (прошло 60 мин).</b>\nБот готов к поиску новых сделок.")
                 continue
         except Exception as e:
             logger.warning(f"Ошибка проверки возраста сделки #{sig_id}: {e}")
@@ -310,9 +310,21 @@ def main():
                             active_signals = get_open_signals()
                             same_dir_signals = [s for s in active_signals if s.get("symbol") == sym and s["direction"] == action]
 
+                            allow_signal = True
                             if same_dir_signals:
-                                logger.info(f"[{sym}] Сигнал {action} пропущен: уже открыта активная сделка #{same_dir_signals[-1]['id']}.")
-                            else:
+                                last_sig = same_dir_signals[-1]
+                                try:
+                                    last_dt = datetime.fromisoformat(last_sig["created_at"])
+                                    sig_age_min = (now_utc - last_dt).total_seconds() / 60.0
+                                    if sig_age_min < 45.0:
+                                        logger.info(f"[{sym}] Сигнал {action} пропущен: уже открыта свежая сделка #{last_sig['id']} ({sig_age_min:.0f} мин назад).")
+                                        allow_signal = False
+                                    else:
+                                        logger.info(f"[{sym}] Предыдущая сделка #{last_sig['id']} открыта более 45 мин назад ({sig_age_min:.0f} мин). Разрешаем новый сигнал.")
+                                except Exception:
+                                    pass
+
+                            if allow_signal:
                                 levels = calculate_risk_levels(action, close_p, atr_val)
                                 session_name = get_current_trading_session_name(now_utc)
 

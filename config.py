@@ -47,7 +47,7 @@ SYMBOL_NAMES = {
 }
 
 SYMBOL = SYMBOLS[0]  # основной символ по умолчанию
-TIMEFRAME = os.getenv("TIMEFRAME", "15min").strip()  # 15min
+TIMEFRAME = os.getenv("TIMEFRAME", "5min").strip()  # 5min для динамичного анализа
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))  # каждые 5 минут
 
 # Настройки Machine Learning
