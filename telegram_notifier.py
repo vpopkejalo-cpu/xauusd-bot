@@ -89,18 +89,24 @@ class TelegramNotifier:
         except Exception as e:
             logger.warning(f"Не удалось ответить на callback: {e}")
 
-    def send_startup_notification(self, interval: str, min_prob: float):
+    def send_startup_notification(self, interval: str, min_prob: float, symbols: Optional[list] = None):
         """Отправляет тестовое приветственное сообщение при старте бота."""
+        from config import SYMBOL_NAMES
+        sym_list = symbols or [SYMBOL]
+        display_syms = "\n".join([f"• <b>{SYMBOL_NAMES.get(s, s)}</b>" for s in sym_list])
+
         message = (
-            "🚀 <b>Торговый ассистент XAU/USD запущен 24/7!</b>\n\n"
-            "✅ <b>Статус:</b> Активен и анализирует рынок\n"
-            f"📈 <b>Инструмент:</b> {SYMBOL} (Золото)\n"
+            "🚀 <b>Мульти-активный помощник трейдера запущен 24/7!</b>\n\n"
+            "✅ <b>Статус:</b> Мониторинг рынка и новостей активен\n"
             f"⏱ <b>Таймфрейм:</b> {interval}\n"
             f"🧠 <b>ML Фильтр вероятности:</b> ≥ {min_prob:.0%}\n"
-            "🛡 <b>Фильтр Азии:</b> Активен (23:00 - 08:00 GMT блокируются)\n\n"
-            "🎮 <i>Под каждым сигналом теперь есть интерактивные кнопки: подтверждайте открытие сделок и фиксируйте результат нажатием одной кнопки.</i>\n\n"
+            "🛡 <b>Новостной щит:</b> Активен (NFP, CPI, ФРС, запасы нефти EIA)\n"
+            "🛡 <b>Фильтр Азии:</b> Активен (23:00 - 08:00 GMT)\n\n"
+            "📊 <b>Отслеживаемые инструменты:</b>\n"
+            f"{display_syms}\n\n"
+            "🎮 <i>Под каждым сигналом есть кнопки для управления сделкой.</i>\n\n"
             "📌 <b>Команды:</b>\n"
-            "• <code>/status</code> — текущий статус бота и открытых позиций\n"
+            "• <code>/status</code> — текущие открытые позиции по всем парам\n"
             "• <code>/reset</code> — принудительно сбросить все зависшие сделки"
         )
         return self.send_raw_message(message)
@@ -108,6 +114,7 @@ class TelegramNotifier:
     def send_trade_signal(
         self,
         signal_id: int,
+        symbol: str,
         direction: str,
         entry_price: float,
         stop_loss: float,
@@ -115,12 +122,17 @@ class TelegramNotifier:
         probability: float,
         atr: float,
         risk_reward: str,
-        session_name: str
+        session_name: str,
+        news_sentiment: str = "",
+        headline: str = ""
     ) -> Optional[int]:
         """
-        Форматирует и отправляет готовый торговый сигнал с интерактивными кнопками:
+        Форматирует и отправляет готовый торговый сигнал с новостным фоном и кнопками:
         [✅ Вошел в сделку] [⏭ Пропустил]
         """
+        from config import SYMBOL_NAMES
+        display_name = SYMBOL_NAMES.get(symbol, symbol)
+
         if direction.upper() == "BUY":
             dir_emoji = "🟢"
             dir_name = "ПОКУПКА (BUY)"
@@ -130,9 +142,17 @@ class TelegramNotifier:
             dir_name = "ПРОДАЖА (SELL)"
             color_badge = "📉 <b>ВХОД В ШОРТ</b>"
 
+        news_block = ""
+        if news_sentiment:
+            news_block = f"📰 <b>Новостной фон:</b> {news_sentiment}\n"
+        if headline and headline != "Рыночный фон стабилен":
+            clean_head = headline[:90] + ("..." if len(headline) > 90 else "")
+            news_block += f"🗞 <b>Свежая новость:</b> <i>«{clean_head}»</i>\n"
+
         message = (
             f"🔔 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ: #{signal_id}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🏷 <b>Инструмент:</b> <b>{display_name}</b>\n"
             f"{color_badge} {dir_emoji}\n\n"
             f"🎯 <b>Направление:</b> {dir_name}\n"
             f"💵 <b>Цена входа:</b> <code>{entry_price:.2f}</code>\n"
@@ -141,6 +161,7 @@ class TelegramNotifier:
             f"⚖️ <b>Соотношение R:R:</b> <code>{risk_reward}</code>\n\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Уверенность ML:</b> <b>{probability:.1%}</b>\n"
+            f"{news_block}"
             f"🌊 <b>Волатильность (ATR 14):</b> <code>${atr:.2f}</code>\n"
             f"🌍 <b>Сессия:</b> {session_name}\n\n"
             f"👇 <b>Вы вошли в эту сделку? Нажмите кнопку:</b>"

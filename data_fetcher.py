@@ -57,7 +57,7 @@ class DataFetcher:
         stop=stop_after_attempt(5),
         before_sleep=before_sleep_log(logger, logging.WARNING)
     )
-    def fetch_time_series(self, outputsize: int = 120) -> pd.DataFrame:
+    def fetch_time_series(self, symbol: Optional[str] = None, outputsize: int = 120) -> pd.DataFrame:
         """
         Запрашивает исторические свечи через endpoint /time_series.
         В случае ошибки HTTP 429 или сообщения о лимитах автоматически повторяет с экспоненциальной задержкой.
@@ -65,10 +65,11 @@ class DataFetcher:
         Возвращает DataFrame со свечами (индекс - datetime, колонки open, high, low, close, volume).
         """
         self._respect_rate_limits()
+        target_symbol = symbol if symbol else self.symbol
 
         url = f"{BASE_URL}/time_series"
         params = {
-            "symbol": self.symbol,
+            "symbol": target_symbol,
             "interval": self.interval,
             "outputsize": outputsize,
             "apikey": self.api_key,

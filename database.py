@@ -28,7 +28,7 @@ def init_db():
         # Таблица свечей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS candles (
-                timestamp TEXT PRIMARY KEY,
+                timestamp TEXT,
                 open REAL NOT NULL,
                 high REAL NOT NULL,
                 low REAL NOT NULL,
@@ -36,6 +36,14 @@ def init_db():
                 volume REAL DEFAULT 0
             )
         """)
+        
+        # Миграция: добавляем колонку symbol, если её еще нет
+        cursor.execute("PRAGMA table_info(candles)")
+        cols = [row["name"] for row in cursor.fetchall()]
+        if "symbol" not in cols:
+            cursor.execute("ALTER TABLE candles ADD COLUMN symbol TEXT DEFAULT 'XAU/USD'")
+            
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_candles_sym_ts ON candles (symbol, timestamp)")
         
         # Таблица сгенерированных сигналов
         cursor.execute("""
@@ -71,10 +79,10 @@ def init_db():
     logger.info("База данных SQLite успешно инициализирована.")
 
 
-def save_candles(df: pd.DataFrame):
+def save_candles(df: pd.DataFrame, symbol: str = "XAU/USD"):
     """
-    Сохраняет новые свечи в базу данных, игнорируя дубликаты по timestamp.
-    Ожидает DataFrame с колонками: open, high, low, close, volume и индексом datetime или колонкой timestamp.
+    Сохраняет новые свечи в базу данных с привязкой к конкретному символу.
+    Игнорирует дубликаты.
     """
     if df.empty:
         return
@@ -93,9 +101,10 @@ def save_candles(df: pd.DataFrame):
         cursor = conn.cursor()
         for _, row in data.iterrows():
             cursor.execute("""
-                INSERT OR IGNORE INTO candles (timestamp, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO candles (symbol, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
+                symbol,
                 str(row["timestamp"]),
                 float(row["open"]),
                 float(row["high"]),
@@ -106,11 +115,15 @@ def save_candles(df: pd.DataFrame):
         conn.commit()
 
 
-def load_candles_from_db(limit: int = 1000) -> pd.DataFrame:
-    """Загружает последние сохраненные свечи из базы данных в виде pandas DataFrame."""
+def load_candles_from_db(symbol: Optional[str] = None, limit: int = 1000) -> pd.DataFrame:
+    """Загружает последние сохраненные свечи для конкретного символа или всех символов."""
     with get_connection() as conn:
-        query = f"SELECT * FROM candles ORDER BY timestamp DESC LIMIT {limit}"
-        df = pd.read_sql_query(query, conn)
+        if symbol:
+            query = f"SELECT * FROM candles WHERE symbol = ? ORDER BY timestamp DESC LIMIT {limit}"
+            df = pd.read_sql_query(query, conn, params=(symbol,))
+        else:
+            query = f"SELECT * FROM candles ORDER BY timestamp DESC LIMIT {limit}"
+            df = pd.read_sql_query(query, conn)
 
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"])

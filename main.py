@@ -1,8 +1,8 @@
 """
-Главный модуль автономного Telegram-ассистента трейдера (XAU/USD).
-Работает в непрерывном цикле 24/7 под управлением systemd.
-Координирует получение данных, расчет индикаторов, ML-прогнозирование,
-проверку открытых сделок и периодическое самообучение.
+Главный модуль автономного Telegram-ассистента трейдера (Мульти-активы + Новости).
+Работает в непрерывном цикле 24/7.
+Анализирует 5 ключевых активов: XAU/USD, XAG/USD, GBP/USD, TECH100 (QQQ), BRENT (BNO).
+Оснащен экономическим календарем («Новостной щит») и анализом сантимента новостей.
 """
 
 import sys
@@ -13,15 +13,19 @@ import threading
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
+from typing import Optional
 
 from config import (
     validate_config,
     SYMBOL,
+    SYMBOLS,
+    SYMBOL_NAMES,
     TIMEFRAME,
     POLL_INTERVAL_SECONDS,
     MIN_PROBABILITY,
     RETRAIN_INTERVAL_HOURS,
-    ATR_PERIOD
+    ATR_PERIOD,
+    NEWS_FILTER_ENABLED
 )
 from database import (
     init_db,
@@ -34,6 +38,7 @@ from database import (
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
 from ml_model import TradingMLModel
+from news_filter import fetch_news_sentiment, check_economic_calendar_shield
 from risk_manager import (
     is_market_open,
     is_asian_session,
@@ -53,16 +58,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MainBot")
 
+
 # Встроенный легковесный веб-сервер для облачных платформ (Render, Koyeb и др.)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"OK: XAU/USD Trading Bot is running 24/7\n")
+        self.wfile.write(b"OK: Multi-Asset XAU/USD/GBP/TECH/BRENT Trading Bot is running 24/7\n")
 
     def log_message(self, format, *args):
-        # Отключаем спам в консоль при пингах от мониторинга
         pass
 
 
@@ -76,6 +81,7 @@ def start_health_server():
         logger.info(f"Встроенный веб-сервер проверки здоровья запущен на порту {port}")
     except Exception as e:
         logger.warning(f"Не удалось запустить веб-сервер проверки здоровья: {e}")
+
 
 # Флаг для корректной остановки процесса
 running = True
@@ -92,9 +98,9 @@ signal.signal(signal.SIGINT, handle_shutdown_signal)
 signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
 
-def check_active_trades(current_candle, notifier: TelegramNotifier):
+def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Optional[str] = None):
     """
-    Проверяет все открытые сигналы на предмет достижения Take Profit или Stop Loss.
+    Проверяет открытые сигналы на предмет достижения Take Profit или Stop Loss.
     Также закрывает устаревшие сделки (старше 4 часов), чтобы не блокировать бота.
     """
     open_signals = get_open_signals()
@@ -107,6 +113,10 @@ def check_active_trades(current_candle, notifier: TelegramNotifier):
     now_utc = datetime.utcnow()
 
     for sig in open_signals:
+        sig_symbol = sig.get("symbol", "XAU/USD")
+        if symbol and sig_symbol != symbol:
+            continue
+
         sig_id = sig["id"]
         direction = sig["direction"]
         entry = float(sig["entry_price"])
@@ -118,9 +128,10 @@ def check_active_trades(current_candle, notifier: TelegramNotifier):
             created_dt = datetime.fromisoformat(sig["created_at"])
             age_hours = (now_utc - created_dt).total_seconds() / 3600.0
             if age_hours >= 4.0:
-                logger.info(f"Сделка #{sig_id} ({direction}) открыта более 4 часов. Автоматически закрываем (EXPIRED).")
-                update_signal_status(sig_id, "EXPIRED", close, close - entry if direction == "BUY" else entry - close)
-                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({direction}) снят с отслеживания (прошло 4 часа).</b>\nБот готов к поиску новых сделок.")
+                logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) открыта более 4 часов. Автоматически закрываем (EXPIRED).")
+                pnl = (close - entry) if direction == "BUY" else (entry - close)
+                update_signal_status(sig_id, "EXPIRED", close, pnl)
+                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({sig_symbol} {direction}) снят с отслеживания (прошло 4 часа).</b>\nБот готов к поиску новых сделок.")
                 continue
         except Exception as e:
             logger.warning(f"Ошибка проверки возраста сделки #{sig_id}: {e}")
@@ -149,14 +160,15 @@ def check_active_trades(current_candle, notifier: TelegramNotifier):
                 pnl = entry - sl
 
         if status:
-            logger.info(f"Сделка #{sig_id} ({direction}) закрыта: {status}. PnL: {pnl:.2f}")
+            logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) закрыта: {status}. PnL: {pnl:.2f}")
             update_signal_status(sig_id, status, exit_price, pnl)
             notifier.send_trade_outcome(sig_id, direction, status, pnl, exit_price)
 
 
 def main():
     logger.info("==================================================")
-    logger.info("Запуск автономного Telegram-помощника трейдера XAU/USD")
+    logger.info("Запуск мульти-активного торгового помощника с новостным щитом")
+    logger.info(f"Отслеживаемые активы ({len(SYMBOLS)}): {', '.join(SYMBOLS)}")
     logger.info("==================================================")
 
     # 1. Проверка конфигурации .env
@@ -178,150 +190,182 @@ def main():
     ml_model = TradingMLModel()
     notifier = TelegramNotifier()
 
-    # Запуск фонового слушателя кнопок Telegram
+    # Запуск фонового слушателя кнопок и команд в Telegram
     notifier.start_polling()
 
-    # 5. Отправка тестового стартового уведомления в Telegram
+    # 5. Отправка тестового стартового уведомления в Telegram со списком всех инструментов
     try:
-        notifier.send_startup_notification(interval=TIMEFRAME, min_prob=MIN_PROBABILITY)
+        notifier.send_startup_notification(interval=TIMEFRAME, min_prob=MIN_PROBABILITY, symbols=SYMBOLS)
     except Exception as e:
         logger.error(f"Не удалось отправить приветственное сообщение в Telegram: {e}")
 
-    # 6. Первоначальная загрузка исторических данных и обучение модели (500 свечей для надежности)
-    logger.info("Загрузка расширенных рыночных данных (500 свечей) для обучения...")
-    try:
-        candles_df = fetcher.fetch_time_series(outputsize=500)
-        if not candles_df.empty:
-            save_candles(candles_df)
-            candles_with_indicators = calculate_indicators(candles_df, atr_period=ATR_PERIOD)
-            
-            # Обучаем модель на расширенной выборке
-            logger.info("Выполняем обучение ML модели на расширенной истории...")
-            if ml_model.train(candles_with_indicators):
-                notifier.send_retrain_notification(len(candles_with_indicators), ml_model.last_accuracy)
-    except Exception as e:
-        logger.error(f"Ошибка при начальной загрузке данных: {e}", exc_info=True)
+    # 6. Первоначальная загрузка исторических данных и обучение модели
+    logger.info("Начальная загрузка исторических данных по активам для обучения...")
+    all_training_dfs = []
+    for sym in SYMBOLS:
+        try:
+            logger.info(f"Загрузка истории для {sym}...")
+            candles_df = fetcher.fetch_time_series(symbol=sym, outputsize=150)
+            if not candles_df.empty:
+                save_candles(candles_df, symbol=sym)
+                candles_with_ind = calculate_indicators(candles_df, atr_period=ATR_PERIOD)
+                all_training_dfs.append(candles_with_ind)
+        except Exception as e:
+            logger.error(f"Ошибка начальной загрузки {sym}: {e}")
+
+    # Если есть накопленные данные, обучаем единую масштабированную ML-модель
+    if all_training_dfs and not ml_model.is_trained:
+        try:
+            import pandas as pd
+            merged_df = pd.concat(all_training_dfs, axis=0)
+            logger.info(f"Выполняем обучение ML модели на {len(merged_df)} свечах...")
+            if ml_model.train(merged_df):
+                notifier.send_retrain_notification(len(merged_df), ml_model.last_accuracy)
+        except Exception as e:
+            logger.error(f"Ошибка начального обучения модели: {e}")
 
     last_retrain_time = time.time()
-    last_processed_timestamp = None
+    last_processed_timestamps = {s: None for s in SYMBOLS}
 
-    logger.info(f"Основной цикл запущен. Интервал опроса: {POLL_INTERVAL_SECONDS} сек. 24/7.")
+    logger.info(f"Основной цикл запущен. Сканирование каждые {POLL_INTERVAL_SECONDS} сек. 24/7.")
 
     # 7. Основной бесконечный цикл
     while running:
         try:
             now_utc = datetime.now(timezone.utc)
 
-            # Проверка открытия мирового рынка золота (выходные дни)
+            # Проверка открытия мирового рынка золота / форекс (выходные дни)
             market_open, market_reason = is_market_open(now_utc)
-            if not market_open:
-                logger.info(f"{market_reason}. Ожидание открытия рынка...")
-                time.sleep(min(POLL_INTERVAL_SECONDS, 600))
-                continue
 
-            # Получаем свежие свечи через Twelve Data API
-            df = fetcher.fetch_time_series(outputsize=100)
-            if df.empty:
-                logger.warning("Получен пустой датасет, пропускаем итерацию.")
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+            # Последовательный опрос всех активов
+            for sym in SYMBOLS:
+                if not running:
+                    break
 
-            save_candles(df)
-            df_with_ind = calculate_indicators(df, atr_period=ATR_PERIOD)
-            latest_candle = df_with_ind.iloc[-1]
-            latest_timestamp = df_with_ind.index[-1]
+                # Если рынок закрыт на выходные, металлы и валюты пропускаем (кроме криптовалют, если есть)
+                if not market_open and sym in ("XAU/USD", "XAG/USD", "GBP/USD", "QQQ"):
+                    continue
 
-            # Проверка открытых позиций на срабатывание TP/SL
-            check_active_trades(latest_candle, notifier)
+                try:
+                    # 1. Получаем свежие свечи с защитой лимитов Twelve Data
+                    df = fetcher.fetch_time_series(symbol=sym, outputsize=60)
+                    if df.empty:
+                        continue
 
-            # Проверяем, появилась ли новая закрывшаяся свеча
-            if latest_timestamp != last_processed_timestamp:
-                last_processed_timestamp = latest_timestamp
-                logger.info(f"Анализ закрытой свечи: {latest_timestamp} | Close: {latest_candle['close']:.2f} | ATR: {latest_candle.get('atr', 0):.2f}")
+                    save_candles(df, symbol=sym)
+                    df_with_ind = calculate_indicators(df, atr_period=ATR_PERIOD)
+                    latest_candle = df_with_ind.iloc[-1]
+                    latest_timestamp = df_with_ind.index[-1]
 
-                # Проверка фильтра Азиатской сессии (микроструктура рынка)
-                in_asian = is_asian_session(now_utc)
-                if in_asian:
-                    logger.info("Фильтр Азиатской сессии АКТИВЕН (23:00-08:00 GMT). Сигналы заблокированы для исключения ложных пробоев.")
-                else:
-                    # ML модуль анализирует свечу и рассчитывает вероятности
-                    prediction = ml_model.predict(latest_candle)
-                    action = prediction["action"]
-                    prob = prediction["probability"]
-                    reason = prediction["reason"]
+                    # 2. Проверка открытых позиций по этому активу
+                    check_active_trades(latest_candle, notifier, symbol=sym)
 
-                    logger.info(f"ML Решение: {action} (вероятность {prob:.1%}) - {reason}")
-
-                    # ТРЕНДОВЫЙ ФИЛЬТР (EMA 50): исключает опасные входы против старшего тренда
-                    if action in ("BUY", "SELL"):
+                    # 3. Проверяем закрытие новой свечи
+                    if latest_timestamp != last_processed_timestamps.get(sym):
+                        last_processed_timestamps[sym] = latest_timestamp
                         close_p = float(latest_candle["close"])
-                        ema_50 = float(latest_candle.get("ema_50", close_p))
+                        atr_val = float(latest_candle.get("atr", close_p * 0.002))
+                        logger.info(f"[{sym}] Анализ свечи: {latest_timestamp} | Close: {close_p:.2f} | ATR: {atr_val:.2f}")
 
-                        if action == "BUY" and close_p < ema_50:
-                            logger.info(f"Сигнал BUY отфильтрован трендовым фильтром: цена {close_p:.2f} ниже EMA50 {ema_50:.2f} (нисходящий тренд).")
+                        # 4. НОВОСТНОЙ ЩИТ (Economic Calendar Shield)
+                        news_info = fetch_news_sentiment(sym)
+                        if NEWS_FILTER_ENABLED and news_info["shield_active"]:
+                            logger.info(f"[{sym}] НОВОСТНОЙ ЩИТ АКТИВЕН: {news_info['shield_reason']}. Сигналы заблокированы для защиты депозита.")
+                            continue
+
+                        # 5. ФИЛЬТР АЗИАТСКОЙ СЕССИИ (для металлов и валют)
+                        if sym in ("XAU/USD", "XAG/USD", "GBP/USD") and is_asian_session(now_utc):
+                            logger.info(f"[{sym}] Фильтр Азиатской сессии АКТИВЕН (23:00-08:00 GMT). Пропуск.")
+                            continue
+
+                        # 6. ML ПРОГНОЗ
+                        prediction = ml_model.predict(latest_candle)
+                        action = prediction["action"]
+                        prob = prediction["probability"]
+                        reason = prediction["reason"]
+
+                        logger.info(f"[{sym}] ML Решение: {action} ({prob:.1%}) - {reason}")
+
+                        # 7. ТРЕНДОВЫЙ ФИЛЬТР (EMA 50)
+                        if action in ("BUY", "SELL"):
+                            ema_50 = float(latest_candle.get("ema_50", close_p))
+                            if action == "BUY" and close_p < ema_50:
+                                logger.info(f"[{sym}] Сигнал BUY отфильтрован: цена {close_p:.2f} ниже EMA50 {ema_50:.2f} (нисходящий тренд).")
+                                action = "HOLD"
+                            elif action == "SELL" and close_p > ema_50:
+                                logger.info(f"[{sym}] Сигнал SELL отфильтрован: цена {close_p:.2f} выше EMA50 {ema_50:.2f} (восходящий тренд).")
+                                action = "HOLD"
+
+                        # 8. ПОДТВЕРЖДЕНИЕ НОВОСТНЫМ САНТИМЕНТОМ
+                        # Не открывать BUY на резко негативных новостях, и не открывать SELL на позитивных
+                        if action == "BUY" and news_info["score"] <= -0.3:
+                            logger.info(f"[{sym}] Сигнал BUY отфильтрован: новостной фон негативный ({news_info['score']}).")
                             action = "HOLD"
-                        elif action == "SELL" and close_p > ema_50:
-                            logger.info(f"Сигнал SELL отфильтрован трендовым фильтром: цена {close_p:.2f} выше EMA50 {ema_50:.2f} (восходящий тренд).")
+                        elif action == "SELL" and news_info["score"] >= 0.3:
+                            logger.info(f"[{sym}] Сигнал SELL отфильтрован: новостной фон позитивный ({news_info['score']}).")
                             action = "HOLD"
 
-                    if action in ("BUY", "SELL"):
-                        # Проверяем, нет ли уже активной сделки в том же направлении
-                        active_signals = get_open_signals()
-                        same_dir_signals = [s for s in active_signals if s["direction"] == action]
+                        # 9. ГЕНЕРАЦИЯ И ОТПРАВКА СИГНАЛА
+                        if action in ("BUY", "SELL"):
+                            active_signals = get_open_signals()
+                            same_dir_signals = [s for s in active_signals if s.get("symbol") == sym and s["direction"] == action]
 
-                        if same_dir_signals:
-                            logger.info(f"Сигнал {action} пропущен: уже открыта активная сделка #{same_dir_signals[-1]['id']}.")
-                        else:
-                            # Расчет динамических TP и SL на основе ATR
-                            entry_price = float(latest_candle["close"])
-                            atr_val = float(latest_candle.get("atr", entry_price * 0.002))
-                            session_name = get_current_trading_session_name(now_utc)
+                            if same_dir_signals:
+                                logger.info(f"[{sym}] Сигнал {action} пропущен: уже открыта активная сделка #{same_dir_signals[-1]['id']}.")
+                            else:
+                                levels = calculate_risk_levels(action, close_p, atr_val)
+                                session_name = get_current_trading_session_name(now_utc)
 
-                            levels = calculate_risk_levels(action, entry_price, atr_val)
+                                # Сохранение в БД
+                                sig_id = save_signal(
+                                    symbol=sym,
+                                    direction=action,
+                                    entry_price=levels["entry_price"],
+                                    take_profit=levels["take_profit"],
+                                    stop_loss=levels["stop_loss"],
+                                    atr=levels["atr"],
+                                    probability=prob
+                                )
 
-                            # Сохраняем в базу данных
-                            sig_id = save_signal(
-                                symbol=SYMBOL,
-                                direction=action,
-                                entry_price=levels["entry_price"],
-                                take_profit=levels["take_profit"],
-                                stop_loss=levels["stop_loss"],
-                                atr=levels["atr"],
-                                probability=prob
-                            )
+                                logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} по {close_p:.2f}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
 
-                            logger.info(f"Сформирован сигнал #{sig_id}: {action} по {entry_price:.2f}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
+                                # Отправка в Telegram с новостями и интерактивными кнопками
+                                notifier.send_trade_signal(
+                                    signal_id=sig_id,
+                                    symbol=sym,
+                                    direction=action,
+                                    entry_price=levels["entry_price"],
+                                    stop_loss=levels["stop_loss"],
+                                    take_profit=levels["take_profit"],
+                                    probability=prob,
+                                    atr=levels["atr"],
+                                    risk_reward=levels["risk_reward_ratio"],
+                                    session_name=session_name,
+                                    news_sentiment=news_info["label"],
+                                    headline=news_info["top_headline"]
+                                )
 
-                            # Отправляем форматированное сообщение в Telegram с кнопками
-                            notifier.send_trade_signal(
-                                signal_id=sig_id,
-                                direction=action,
-                                entry_price=levels["entry_price"],
-                                stop_loss=levels["stop_loss"],
-                                take_profit=levels["take_profit"],
-                                probability=prob,
-                                atr=levels["atr"],
-                                risk_reward=levels["risk_reward_ratio"],
-                                session_name=session_name
-                            )
+                except RateLimitError as e:
+                    logger.warning(f"[{sym}] Rate limit: {e}. Пауза...")
+                    time.sleep(10)
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке {sym}: {e}", exc_info=False)
 
-            # Проверка необходимости периодического самообучения (раз в RETRAIN_INTERVAL_HOURS)
+            # Проверка необходимости периодического самообучения (раз в сутки)
             elapsed_hours = (time.time() - last_retrain_time) / 3600.0
             if elapsed_hours >= RETRAIN_INTERVAL_HOURS:
-                logger.info(f"Прошло {elapsed_hours:.1f} ч. Запуск планового самообучения модели...")
-                all_candles = load_candles_from_db(limit=1000)
-                if len(all_candles) >= 80:
+                logger.info(f"Прошло {elapsed_hours:.1f} ч. Плановое самообучение модели на свежих данных...")
+                all_candles = load_candles_from_db(limit=2000)
+                if len(all_candles) >= 100:
                     ind_all = calculate_indicators(all_candles, atr_period=ATR_PERIOD)
                     if ml_model.train(ind_all):
                         notifier.send_retrain_notification(len(ind_all), ml_model.last_accuracy)
                         last_retrain_time = time.time()
 
-        except RateLimitError as e:
-            logger.warning(f"Ограничение частоты запросов API (Rate Limit): {e}. Ожидание...")
         except Exception as e:
             logger.error(f"Непредвиденная ошибка в основном цикле: {e}", exc_info=True)
 
-        # Пауза перед следующей проверкой
+        # Пауза перед следующим циклом проверки
         for _ in range(POLL_INTERVAL_SECONDS):
             if not running:
                 break

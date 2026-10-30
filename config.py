@@ -23,9 +23,31 @@ TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# Параметры торгового инструмента
-SYMBOL = os.getenv("SYMBOL", "XAU/USD").strip()
-TIMEFRAME = os.getenv("TIMEFRAME", "15min").strip()  # 15min, 1h, etc.
+# Параметры торговых инструментов (Мульти-активы)
+DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "QQQ", "BNO"]
+raw_symbols = os.getenv("SYMBOLS", "").strip()
+if raw_symbols:
+    SYMBOLS = [s.strip() for s in raw_symbols.split(",") if s.strip()]
+else:
+    # Совместимость с одиночным SYMBOL, если задан в .env
+    single_symbol = os.getenv("SYMBOL", "").strip()
+    if single_symbol and single_symbol not in ("XAU/USD", ""):
+        SYMBOLS = [single_symbol]
+    else:
+        SYMBOLS = DEFAULT_SYMBOLS
+
+SYMBOL_NAMES = {
+    "XAU/USD": "XAU/USD (Золото)",
+    "XAG/USD": "XAG/USD (Серебро)",
+    "GBP/USD": "GBP/USD (Британский фунт)",
+    "QQQ": "TECH100 (Индекс Nasdaq)",
+    "TECH100": "TECH100 (Индекс Nasdaq)",
+    "BNO": "BRENT (Нефть)",
+    "BRENT": "BRENT (Нефть)"
+}
+
+SYMBOL = SYMBOLS[0]  # основной символ по умолчанию
+TIMEFRAME = os.getenv("TIMEFRAME", "15min").strip()  # 15min
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))  # каждые 5 минут
 
 # Настройки Machine Learning
@@ -41,6 +63,9 @@ TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "2.5"))  # TP = 2.5 * A
 FILTER_ASIAN_SESSION = os.getenv("FILTER_ASIAN_SESSION", "true").lower() in ("true", "1", "yes")
 ASIAN_SESSION_START_HOUR = int(os.getenv("ASIAN_SESSION_START_HOUR", "23"))
 ASIAN_SESSION_END_HOUR = int(os.getenv("ASIAN_SESSION_END_HOUR", "8"))
+
+# Фильтр новостей и экономический календарь
+NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # База данных и пути хранения
 DATABASE_PATH = BASE_DIR / "trading_bot.db"
