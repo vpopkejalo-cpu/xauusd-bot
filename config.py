@@ -75,6 +75,7 @@ ASIAN_SESSION_END_HOUR = int(os.getenv("ASIAN_SESSION_END_HOUR", "8"))
 NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # База данных и пути хранения
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DATABASE_PATH = BASE_DIR / "trading_bot.db"
 MODEL_PATH = BASE_DIR / "ml_model.joblib"
 
