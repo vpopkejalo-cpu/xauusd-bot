@@ -23,8 +23,8 @@ TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# Параметры торговых инструментов (Мульти-активы)
-DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "TECH100", "BRENT"]
+# Параметры торговых инструментов (Мульти-активы: 6 ключевых инструментов)
+DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "TECH100", "BRENT", "NATGAS"]
 raw_symbols = os.getenv("SYMBOLS", "").strip()
 if raw_symbols:
     SYMBOLS = [s.strip() for s in raw_symbols.split(",") if s.strip()]
@@ -45,7 +45,9 @@ SYMBOL_NAMES = {
     "QQQ": "USA Tech 100 (Trading 212: USA Tech 100)",
     "BRENT": "Brent Crude (Trading 212: Brent Oil)",
     "XBR/USD": "Brent Crude (Trading 212: Brent Oil)",
-    "BNO": "Brent Crude (Trading 212: Brent Oil)"
+    "BNO": "Brent Crude (Trading 212: Brent Oil)",
+    "NATGAS": "Natural Gas (Trading 212: Natural Gas)",
+    "NG=F": "Natural Gas (Trading 212: Natural Gas)"
 }
 
 SYMBOL = SYMBOLS[0]  # основной символ по умолчанию

@@ -457,8 +457,8 @@ class TelegramNotifier:
                 deals_lines = [f"• #{s['id']} <b>{s.get('symbol', 'XAU/USD')}</b> {s['direction']} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})" for s in open_sigs]
                 deals_block = "\n".join(deals_lines)
 
-            # Последние 5 анализов свечей
-            recent = get_recent_analyses(5)
+            # Последние 6 анализов свечей (по числу активов)
+            recent = get_recent_analyses(6)
             if not recent:
                 analyses_block = "<i>История анализов формируется при закрытии свечей...</i>"
             else:
@@ -479,7 +479,7 @@ class TelegramNotifier:
                 f"{prices_block}\n\n"
                 "📋 <b>Активные сделки в боте:</b>\n"
                 f"{deals_block}\n\n"
-                "🔍 <b>Последние 5 анализов рынка:</b>\n"
+                "🔍 <b>Последние 6 анализов рынка:</b>\n"
                 f"{analyses_block}\n\n"
                 "<i>Чтобы сбросить зависшие сделки, нажмите кнопку ниже:</i>"
             )

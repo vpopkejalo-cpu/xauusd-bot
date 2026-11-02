@@ -106,6 +106,8 @@ def calculate_risk_levels(
         decimals = 5
     elif "XAG" in symbol or "SILVER" in symbol.upper():
         decimals = 4
+    elif "NATGAS" in symbol.upper() or "GAS" in symbol.upper() or "NG" in symbol.upper():
+        decimals = 3
     else:
         decimals = 2
 
@@ -134,6 +136,9 @@ def calculate_risk_levels(
     elif "XBR" in symbol or "BRENT" in symbol.upper() or "BNO" in symbol:
         # Нефть Brent
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 10.0, 1.0), 2))
+    elif "NATGAS" in symbol.upper() or "GAS" in symbol.upper() or "NG" in symbol.upper():
+        # Природный газ (NATGAS)
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100.0, 1.0), 2))
     else:
         recommended_lot = max(0.01, round(10.0 / max(sl_distance, 1.0), 2))
 

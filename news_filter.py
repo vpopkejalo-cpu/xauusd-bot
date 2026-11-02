@@ -52,12 +52,17 @@ def check_economic_calendar_shield(symbol: str, check_time: datetime = None) -> 
         if (hour == 14 and minute >= 15) or (hour == 15 and minute <= 0):
             return True, "Публикация отчета по запасам сырой нефти EIA в США (Среда 14:30 GMT)"
 
-    # 2. Регулярные окна публикации важнейшей макростатистики США (13:30 GMT)
+    # 2. Отчет по запасам природного газа EIA (Четверг, 14:30 GMT) - критично для NATGAS
+    if symbol.upper() in ("NATGAS", "NG=F") and weekday == 3:
+        if (hour == 14 and minute >= 15) or (hour == 15 and minute <= 0):
+            return True, "Публикация отчета по запасам природного газа EIA в США (Четверг 14:30 GMT)"
+
+    # 3. Регулярные окна публикации важнейшей макростатистики США (13:30 GMT)
     # По пятницам (NFP) и во вторник/среду/четверг в 13:15-13:45 GMT
     if hour == 13 and 20 <= minute <= 45:
         return True, "Окно публикации макроэкономических отчетов США (Инфляция CPI / Занятость NFP)"
 
-    # 3. Вечерние решения ФРС США по процентной ставке (FOMC) в 18:50 - 19:40 GMT
+    # 4. Вечерние решения ФРС США по процентной ставке (FOMC) в 18:50 - 19:40 GMT
     if weekday == 2 and hour == 19:
         return True, "Окно решений Федеральной резервной системы (ФРС США)"
 
@@ -84,7 +89,9 @@ def fetch_news_sentiment(symbol: str) -> Dict[str, Any]:
         "QQQ": "Nasdaq tech stocks QQQ",
         "BRENT": "Brent crude oil price",
         "XBR/USD": "Brent crude oil price",
-        "BNO": "Brent crude oil price"
+        "BNO": "Brent crude oil price",
+        "NATGAS": "Natural gas price Henry Hub",
+        "NG=F": "Natural gas price Henry Hub"
     }
 
     query = search_queries.get(symbol, f"{symbol} price")

@@ -71,6 +71,9 @@ class DataFetcher:
             "XBR/USD": "BZ=F",
             "UKOIL": "BZ=F",
             "BNO": "BZ=F",
+            "NATGAS": "NG=F",
+            "NATURAL GAS": "NG=F",
+            "NG=F": "NG=F",
             "XAU/USD": "GC=F",
             "GBP/USD": "GBPUSD=X"
         }
@@ -151,7 +154,8 @@ class DataFetcher:
         yahoo_preferred_symbols = (
             "TECH100", "USA TECH 100", "US100", "QQQ",
             "XAG/USD", "XAGUSD", "SILVER",
-            "BRENT", "XBR/USD", "BNO", "UKOIL"
+            "BRENT", "XBR/USD", "BNO", "UKOIL",
+            "NATGAS", "NATURAL GAS", "NG=F"
         )
 
         if raw_symbol.upper() in yahoo_preferred_symbols:

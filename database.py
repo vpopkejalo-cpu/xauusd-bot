@@ -130,8 +130,8 @@ def log_candle_analysis(
         conn.commit()
 
 
-def get_recent_analyses(limit: int = 5) -> List[Dict[str, Any]]:
-    """Возвращает последние N анализов рынка."""
+def get_recent_analyses(limit: int = 6) -> List[Dict[str, Any]]:
+    """Возвращает последние N анализов рынка (по умолчанию 6 по числу активов)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
