@@ -23,6 +23,16 @@ if DATABASE_URL and (DATABASE_URL.startswith("postgres://") or DATABASE_URL.star
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
+        import psycopg2.extensions
+        try:
+            import numpy as np
+            psycopg2.extensions.register_adapter(np.float64, psycopg2.extensions.Float)
+            psycopg2.extensions.register_adapter(np.float32, psycopg2.extensions.Float)
+            psycopg2.extensions.register_adapter(np.int64, psycopg2.extensions.AsIs)
+            psycopg2.extensions.register_adapter(np.int32, psycopg2.extensions.AsIs)
+        except Exception:
+            pass
+
         IS_POSTGRES = True
         logger.info("Подключение к базе данных: облачный PostgreSQL (вечная память активна).")
     except ImportError:
@@ -226,12 +236,12 @@ def log_candle_analysis(
     with get_db() as cursor:
         cursor.execute(sql, (
             datetime.utcnow().isoformat(),
-            symbol,
-            close_price,
-            action,
-            probability,
-            outcome,
-            details
+            str(symbol),
+            float(close_price),
+            str(action),
+            float(probability),
+            str(outcome),
+            str(details)
         ))
 
 
@@ -391,13 +401,13 @@ def save_signal(
                 RETURNING id
             """, (
                 datetime.utcnow().isoformat(),
-                symbol,
-                direction,
-                entry_price,
-                take_profit,
-                stop_loss,
-                atr,
-                probability
+                str(symbol),
+                str(direction),
+                float(entry_price),
+                float(take_profit),
+                float(stop_loss),
+                float(atr),
+                float(probability)
             ))
             row = cursor.fetchone()
             return row["id"] if row else 0
@@ -408,13 +418,13 @@ def save_signal(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
             """, (
                 datetime.utcnow().isoformat(),
-                symbol,
-                direction,
-                entry_price,
-                take_profit,
-                stop_loss,
-                atr,
-                probability
+                str(symbol),
+                str(direction),
+                float(entry_price),
+                float(take_profit),
+                float(stop_loss),
+                float(atr),
+                float(probability)
             ))
             return cursor.lastrowid
 
@@ -436,11 +446,11 @@ def update_signal_status(signal_id: int, status: str, exit_price: float, pnl: fl
     """)
     with get_db() as cursor:
         cursor.execute(sql, (
-            status,
+            str(status),
             datetime.utcnow().isoformat(),
-            exit_price,
-            pnl,
-            signal_id
+            float(exit_price),
+            float(pnl),
+            int(signal_id)
         ))
 
 
@@ -452,7 +462,7 @@ def close_all_open_signals(reason: str = "MANUAL_RESET") -> int:
         WHERE status = 'OPEN'
     """)
     with get_db() as cursor:
-        cursor.execute(sql, (reason, datetime.utcnow().isoformat()))
+        cursor.execute(sql, (str(reason), datetime.utcnow().isoformat()))
         return cursor.rowcount
 
 
@@ -460,7 +470,7 @@ def get_signal_by_id(signal_id: int) -> Optional[Dict[str, Any]]:
     """Возвращает информацию о сигнале по ID."""
     sql = _adapt_sql("SELECT * FROM signals WHERE id = ?")
     with get_db() as cursor:
-        cursor.execute(sql, (signal_id,))
+        cursor.execute(sql, (int(signal_id),))
         row = cursor.fetchone()
         return dict(row) if row else None
 
@@ -474,7 +484,7 @@ def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
     with get_db() as cursor:
         cursor.execute(sql, (
             datetime.utcnow().isoformat(),
-            samples_count,
-            accuracy,
-            notes
+            int(samples_count),
+            float(accuracy),
+            str(notes)
         ))

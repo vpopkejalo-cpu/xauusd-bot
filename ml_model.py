@@ -262,8 +262,8 @@ class TradingMLModel:
             probabilities = self.pipeline.predict_proba(features_df)[0]
             prob_map = dict(zip(classes, probabilities))
 
-            buy_prob = prob_map.get(CLASS_BUY, 0.0)
-            sell_prob = prob_map.get(CLASS_SELL, 0.0)
+            buy_prob = float(prob_map.get(CLASS_BUY, 0.0))
+            sell_prob = float(prob_map.get(CLASS_SELL, 0.0))
 
             logger.debug(f"ML Прогноз вероятностей: BUY={buy_prob:.2%}, SELL={sell_prob:.2%}, Порог={self.min_prob:.2%}")
 
@@ -281,7 +281,7 @@ class TradingMLModel:
                     "reason": f"Вероятность успеха SELL {sell_prob:.1%} превышает порог {self.min_prob:.1%}"
                 }
             else:
-                max_prob = max(buy_prob, sell_prob)
+                max_prob = float(max(buy_prob, sell_prob))
                 return {
                     "action": "HOLD",
                     "probability": max_prob,
