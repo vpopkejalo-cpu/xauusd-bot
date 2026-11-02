@@ -50,7 +50,7 @@ class TradingMLModel:
         self.min_prob = min_prob
         self.pipeline: Optional[Pipeline] = None
         self.is_trained = False
-        self.last_accuracy = 0.0
+        self.samples_count = 0
 
         # Попытка загрузить сохраненную ранее модель
         self.load_model()
@@ -62,24 +62,27 @@ class TradingMLModel:
                 data = joblib.load(self.model_path)
                 self.pipeline = data.get("pipeline")
                 self.last_accuracy = data.get("accuracy", 0.0)
+                self.samples_count = data.get("samples_count", 0)
                 self.is_trained = True
-                logger.info(f"ML модель успешно загружена из {self.model_path}. Историческая точность: {self.last_accuracy:.2%}")
+                logger.info(f"ML модель успешно загружена из {self.model_path}. Образцов: {self.samples_count}, Точность: {self.last_accuracy:.2%}")
                 return True
             except Exception as e:
                 logger.error(f"Не удалось загрузить модель из {self.model_path}: {e}")
                 self.is_trained = False
         return False
 
-    def save_model(self, accuracy: float = 0.0):
+    def save_model(self, accuracy: float = 0.0, samples_count: int = 0):
         """Сохраняет обученную модель на диск."""
         try:
             data = {
                 "pipeline": self.pipeline,
                 "accuracy": accuracy,
+                "samples_count": samples_count,
                 "features": FEATURE_COLUMNS
             }
             joblib.dump(data, self.model_path)
-            logger.info(f"ML модель успешно сохранена в {self.model_path}")
+            self.samples_count = samples_count
+            logger.info(f"ML модель успешно сохранена в {self.model_path} ({samples_count} образцов)")
         except Exception as e:
             logger.error(f"Ошибка сохранения модели: {e}")
 
@@ -217,7 +220,7 @@ class TradingMLModel:
             self.last_accuracy = mean_acc
 
             # Сохраняем модель на диск и в лог базы данных
-            self.save_model(accuracy=mean_acc)
+            self.save_model(accuracy=mean_acc, samples_count=len(X))
             log_training_run(samples_count=len(X), accuracy=mean_acc, notes="Автоматическое переобучение")
 
             logger.info(f"Обучение завершено успешно. Образцов: {len(X)}, Средняя точность CV: {mean_acc:.2%}")

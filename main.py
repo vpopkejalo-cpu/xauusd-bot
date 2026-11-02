@@ -23,6 +23,7 @@ from config import (
     TIMEFRAME,
     POLL_INTERVAL_SECONDS,
     MIN_PROBABILITY,
+    TRAINING_CANDLES_COUNT,
     RETRAIN_INTERVAL_HOURS,
     ATR_PERIOD,
     NEWS_FILTER_ENABLED
@@ -202,12 +203,12 @@ def main():
         logger.error(f"Не удалось отправить приветственное сообщение в Telegram: {e}")
 
     # 6. Первоначальная загрузка исторических данных и обучение модели
-    logger.info("Начальная загрузка исторических данных по активам для обучения...")
+    logger.info(f"Начальная загрузка исторических данных по активам для обучения (до {TRAINING_CANDLES_COUNT} свечей на актив)...")
     all_training_dfs = []
     for sym in SYMBOLS:
         try:
-            logger.info(f"Загрузка истории для {sym}...")
-            candles_df = fetcher.fetch_time_series(symbol=sym, outputsize=150)
+            logger.info(f"Загрузка истории для {sym} (до {TRAINING_CANDLES_COUNT} свечей)...")
+            candles_df = fetcher.fetch_time_series(symbol=sym, outputsize=TRAINING_CANDLES_COUNT)
             if not candles_df.empty:
                 save_candles(candles_df, symbol=sym)
                 candles_with_ind = calculate_indicators(candles_df, atr_period=ATR_PERIOD)
@@ -215,12 +216,13 @@ def main():
         except Exception as e:
             logger.error(f"Ошибка начальной загрузки {sym}: {e}")
 
-    # Если есть накопленные данные, обучаем единую масштабированную ML-модель
-    if all_training_dfs and not ml_model.is_trained:
+    # Обучаем модель, если она еще не обучена или была обучена на старом маленьком датасете (< 500 образцов)
+    should_train = not ml_model.is_trained or getattr(ml_model, "samples_count", 0) < 500
+    if all_training_dfs and should_train:
         try:
             import pandas as pd
             merged_df = pd.concat(all_training_dfs, axis=0)
-            logger.info(f"Выполняем обучение ML модели на {len(merged_df)} свечах...")
+            logger.info(f"Выполняем обучение качественной ML модели на {len(merged_df)} свечах...")
             if ml_model.train(merged_df):
                 notifier.send_retrain_notification(len(merged_df), ml_model.last_accuracy)
         except Exception as e:
@@ -316,14 +318,15 @@ def main():
                                 outcome_label = "❌ Выше EMA50 (восходящий тренд)"
 
                         # 8. ПОДТВЕРЖДЕНИЕ НОВОСТНЫМ САНТИМЕНТОМ
-                        if action == "BUY" and news_info["score"] <= -0.3:
-                            logger.info(f"[{sym}] Сигнал BUY отфильтрован: новостной фон негативный ({news_info['score']}).")
+                        # Порог ±0.5: блокируем только при явно сильном противоположном фоне
+                        if action == "BUY" and news_info["score"] <= -0.5:
+                            logger.info(f"[{sym}] Сигнал BUY отфильтрован: новостной фон явно негативный ({news_info['score']}).")
                             action = "HOLD"
-                            outcome_label = "❌ Негативные новости"
-                        elif action == "SELL" and news_info["score"] >= 0.3:
-                            logger.info(f"[{sym}] Сигнал SELL отфильтрован: новостной фон позитивный ({news_info['score']}).")
+                            outcome_label = "❌ Явно негативные новости"
+                        elif action == "SELL" and news_info["score"] >= 0.5:
+                            logger.info(f"[{sym}] Сигнал SELL отфильтрован: новостной фон явно позитивный ({news_info['score']}).")
                             action = "HOLD"
-                            outcome_label = "❌ Позитивные новости"
+                            outcome_label = "❌ Явно позитивные новости"
 
                         # 9. ГЕНЕРАЦИЯ И ОТПРАВКА СИГНАЛА
                         if action in ("BUY", "SELL"):
@@ -393,7 +396,7 @@ def main():
             elapsed_hours = (time.time() - last_retrain_time) / 3600.0
             if elapsed_hours >= RETRAIN_INTERVAL_HOURS:
                 logger.info(f"Прошло {elapsed_hours:.1f} ч. Плановое самообучение модели на свежих данных...")
-                all_candles = load_candles_from_db(limit=2000)
+                all_candles = load_candles_from_db(limit=5000)
                 if len(all_candles) >= 100:
                     ind_all = calculate_indicators(all_candles, atr_period=ATR_PERIOD)
                     if ml_model.train(ind_all):

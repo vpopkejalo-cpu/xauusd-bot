@@ -89,7 +89,15 @@ class DataFetcher:
         else:
             yf_interval = "5m"
 
-        range_str = "5d" if outputsize > 60 else "2d"
+        if outputsize <= 60:
+            range_str = "2d"
+        elif outputsize <= 300:
+            range_str = "5d"
+        elif outputsize <= 800:
+            range_str = "10d"
+        else:
+            range_str = "1mo"
+
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{target}?interval={yf_interval}&range={range_str}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
