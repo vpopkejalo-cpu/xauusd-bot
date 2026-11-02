@@ -128,6 +128,9 @@ def calculate_risk_levels(
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 50.0, 1.0), 2))
     elif "GBP" in symbol:
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100000.0, 1.0), 2))
+    elif "TECH" in symbol.upper() or "NAS" in symbol.upper() or "100" in symbol:
+        # USA Tech 100 CFD: расчет на риск $10
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance, 1.0), 2))
     elif "XBR" in symbol or "BRENT" in symbol.upper() or "BNO" in symbol:
         # Нефть Brent
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 10.0, 1.0), 2))
