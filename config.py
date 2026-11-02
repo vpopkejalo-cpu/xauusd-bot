@@ -24,7 +24,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 # Параметры торговых инструментов (Мульти-активы)
-DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "QQQ", "BNO"]
+DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "QQQ", "XBR/USD"]
 raw_symbols = os.getenv("SYMBOLS", "").strip()
 if raw_symbols:
     SYMBOLS = [s.strip() for s in raw_symbols.split(",") if s.strip()]
@@ -38,13 +38,14 @@ else:
 
 SYMBOL_NAMES = {
     "XAU/USD": "Gold (Trading 212: XAU/USD)",
-    "SLV": "Silver (Trading 212: XAG/USD)",
-    "XAG/USD": "Silver (Trading 212: XAG/USD)",
+    "XAG/USD": "Silver (Trading 212: Silver / XAG/USD)",
+    "SLV": "Silver (Trading 212: Silver / XAG/USD)",
     "GBP/USD": "GBP/USD (Trading 212: GBP/USD)",
-    "QQQ": "TECH100 (Nasdaq ETF QQQ)",
-    "TECH100": "TECH100 (Nasdaq ETF QQQ)",
-    "BNO": "BRENT (Oil ETF BNO)",
-    "BRENT": "BRENT (Oil ETF BNO)"
+    "QQQ": "TECH100 (Trading 212: QQQ)",
+    "TECH100": "TECH100 (Trading 212: QQQ)",
+    "XBR/USD": "Brent Crude (Trading 212: Brent)",
+    "BRENT": "Brent Crude (Trading 212: Brent)",
+    "BNO": "Brent Crude (Trading 212: Brent)"
 }
 
 SYMBOL = SYMBOLS[0]  # основной символ по умолчанию

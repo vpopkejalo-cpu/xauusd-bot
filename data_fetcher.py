@@ -67,13 +67,13 @@ class DataFetcher:
         self._respect_rate_limits()
         raw_symbol = symbol if symbol else self.symbol
 
-        # Автоматический маппинг символов на бесплатные тикеры Twelve Data
+        # Автоматический маппинг символов на тикеры Twelve Data
         ticker_map = {
-            "XAG/USD": "SLV",
-            "XAGUSD": "SLV",
             "TECH100": "QQQ",
             "NAS100": "QQQ",
-            "BRENT": "BNO"
+            "BRENT": "XBR/USD",
+            "BNO": "XBR/USD",
+            "XAGUSD": "XAG/USD"
         }
         target_symbol = ticker_map.get(raw_symbol, raw_symbol)
 

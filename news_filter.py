@@ -48,7 +48,7 @@ def check_economic_calendar_shield(symbol: str, check_time: datetime = None) -> 
     minute = check_time.minute
 
     # 1. Отчет по запасам сырой нефти EIA (Среда, 14:30 GMT) - критично для BRENT
-    if symbol.upper() == "BRENT" and weekday == 2:
+    if symbol.upper() in ("BRENT", "XBR/USD", "BNO") and weekday == 2:
         if (hour == 14 and minute >= 15) or (hour == 15 and minute <= 0):
             return True, "Публикация отчета по запасам сырой нефти EIA в США (Среда 14:30 GMT)"
 
@@ -83,6 +83,7 @@ def fetch_news_sentiment(symbol: str) -> Dict[str, Any]:
         "TECH100": "Nasdaq tech stocks US100",
         "QQQ": "Nasdaq tech stocks QQQ",
         "BRENT": "Brent crude oil price",
+        "XBR/USD": "Brent crude oil price",
         "BNO": "Brent crude oil price"
     }
 

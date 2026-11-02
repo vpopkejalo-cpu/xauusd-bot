@@ -104,8 +104,8 @@ def calculate_risk_levels(
     # Точность знаков после запятой в зависимости от инструмента
     if "GBP" in symbol or "EUR" in symbol:
         decimals = 5
-    elif "XAG" in symbol or "SLV" in symbol:
-        decimals = 3
+    elif "XAG" in symbol or "SILVER" in symbol.upper():
+        decimals = 4
     else:
         decimals = 2
 
@@ -123,8 +123,14 @@ def calculate_risk_levels(
     if "XAU" in symbol or "GOLD" in symbol.upper():
         # Золото: 1 контракт = 100 унций (или 1 унция на Trading 212 CFD)
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100.0, 1.0), 2))
+    elif "XAG" in symbol or "SILVER" in symbol.upper():
+        # Серебро spot
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance * 50.0, 1.0), 2))
     elif "GBP" in symbol:
         recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100000.0, 1.0), 2))
+    elif "XBR" in symbol or "BRENT" in symbol.upper() or "BNO" in symbol:
+        # Нефть Brent
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance * 10.0, 1.0), 2))
     else:
         recommended_lot = max(0.01, round(10.0 / max(sl_distance, 1.0), 2))
 
