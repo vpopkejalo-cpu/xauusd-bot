@@ -33,7 +33,9 @@ from database import (
     load_candles_from_db,
     save_signal,
     get_open_signals,
-    update_signal_status
+    update_signal_status,
+    log_candle_analysis,
+    is_bot_paused
 )
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
@@ -232,6 +234,15 @@ def main():
     # 7. Основной бесконечный цикл
     while running:
         try:
+            # 0. Проверка: не поставил ли пользователь бота на паузу кнопкой в Telegram
+            if is_bot_paused():
+                logger.info("Бот находится на паузе (остановлен пользователем). Запросы к API не отправляются.")
+                for _ in range(15):
+                    if not running or not is_bot_paused():
+                        break
+                    time.sleep(1)
+                continue
+
             now_utc = datetime.now(timezone.utc)
 
             # Проверка открытия мирового рынка золота / форекс (выходные дни)
@@ -239,7 +250,7 @@ def main():
 
             # Последовательный опрос всех активов
             for sym in SYMBOLS:
-                if not running:
+                if not running or is_bot_paused():
                     break
 
                 # Если рынок закрыт на выходные, металлы и валюты пропускаем (кроме криптовалют, если есть)
@@ -256,6 +267,11 @@ def main():
                     df_with_ind = calculate_indicators(df, atr_period=ATR_PERIOD)
                     latest_candle = df_with_ind.iloc[-1]
                     latest_timestamp = df_with_ind.index[-1]
+                    close_p = float(latest_candle["close"])
+                    atr_val = float(latest_candle.get("atr", close_p * 0.002))
+
+                    # Кэшируем актуальную цену для отображения в "Статус Бота"
+                    notifier.update_price(sym, close_p)
 
                     # 2. Проверка открытых позиций по этому активу
                     check_active_trades(latest_candle, notifier, symbol=sym)
@@ -263,19 +279,19 @@ def main():
                     # 3. Проверяем закрытие новой свечи
                     if latest_timestamp != last_processed_timestamps.get(sym):
                         last_processed_timestamps[sym] = latest_timestamp
-                        close_p = float(latest_candle["close"])
-                        atr_val = float(latest_candle.get("atr", close_p * 0.002))
                         logger.info(f"[{sym}] Анализ свечи: {latest_timestamp} | Close: {close_p:.2f} | ATR: {atr_val:.2f}")
 
                         # 4. НОВОСТНОЙ ЩИТ (Economic Calendar Shield)
                         news_info = fetch_news_sentiment(sym)
                         if NEWS_FILTER_ENABLED and news_info["shield_active"]:
                             logger.info(f"[{sym}] НОВОСТНОЙ ЩИТ АКТИВЕН: {news_info['shield_reason']}. Сигналы заблокированы для защиты депозита.")
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "🛡 Новостной щит", news_info["shield_reason"])
                             continue
 
                         # 5. ФИЛЬТР АЗИАТСКОЙ СЕССИИ (для металлов и валют)
                         if sym in ("XAU/USD", "XAG/USD", "GBP/USD") and is_asian_session(now_utc):
                             logger.info(f"[{sym}] Фильтр Азиатской сессии АКТИВЕН (23:00-08:00 GMT). Пропуск.")
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⛩ Азиатская сессия", "Низкая ликвидность")
                             continue
 
                         # 6. ML ПРОГНОЗ
@@ -285,6 +301,7 @@ def main():
                         reason = prediction["reason"]
 
                         logger.info(f"[{sym}] ML Решение: {action} ({prob:.1%}) - {reason}")
+                        outcome_label = f"ML {action}"
 
                         # 7. ТРЕНДОВЫЙ ФИЛЬТР (EMA 50)
                         if action in ("BUY", "SELL"):
@@ -292,18 +309,21 @@ def main():
                             if action == "BUY" and close_p < ema_50:
                                 logger.info(f"[{sym}] Сигнал BUY отфильтрован: цена {close_p:.2f} ниже EMA50 {ema_50:.2f} (нисходящий тренд).")
                                 action = "HOLD"
+                                outcome_label = "❌ Ниже EMA50 (нисходящий тренд)"
                             elif action == "SELL" and close_p > ema_50:
                                 logger.info(f"[{sym}] Сигнал SELL отфильтрован: цена {close_p:.2f} выше EMA50 {ema_50:.2f} (восходящий тренд).")
                                 action = "HOLD"
+                                outcome_label = "❌ Выше EMA50 (восходящий тренд)"
 
                         # 8. ПОДТВЕРЖДЕНИЕ НОВОСТНЫМ САНТИМЕНТОМ
-                        # Не открывать BUY на резко негативных новостях, и не открывать SELL на позитивных
                         if action == "BUY" and news_info["score"] <= -0.3:
                             logger.info(f"[{sym}] Сигнал BUY отфильтрован: новостной фон негативный ({news_info['score']}).")
                             action = "HOLD"
+                            outcome_label = "❌ Негативные новости"
                         elif action == "SELL" and news_info["score"] >= 0.3:
                             logger.info(f"[{sym}] Сигнал SELL отфильтрован: новостной фон позитивный ({news_info['score']}).")
                             action = "HOLD"
+                            outcome_label = "❌ Позитивные новости"
 
                         # 9. ГЕНЕРАЦИЯ И ОТПРАВКА СИГНАЛА
                         if action in ("BUY", "SELL"):
@@ -319,13 +339,14 @@ def main():
                                     if sig_age_min < 45.0:
                                         logger.info(f"[{sym}] Сигнал {action} пропущен: уже открыта свежая сделка #{last_sig['id']} ({sig_age_min:.0f} мин назад).")
                                         allow_signal = False
+                                        outcome_label = f"⏳ Свежая сделка #{last_sig['id']}"
                                     else:
                                         logger.info(f"[{sym}] Предыдущая сделка #{last_sig['id']} открыта более 45 мин назад ({sig_age_min:.0f} мин). Разрешаем новый сигнал.")
                                 except Exception:
                                     pass
 
                             if allow_signal:
-                                levels = calculate_risk_levels(action, close_p, atr_val)
+                                levels = calculate_risk_levels(action, close_p, atr_val, symbol=sym)
                                 session_name = get_current_trading_session_name(now_utc)
 
                                 # Сохранение в БД
@@ -339,9 +360,10 @@ def main():
                                     probability=prob
                                 )
 
-                                logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} по {close_p:.2f}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
+                                logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} по {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
+                                outcome_label = f"✅ Сигнал #{sig_id} {action}"
 
-                                # Отправка в Telegram с новостями и интерактивными кнопками
+                                # Отправка в Telegram с безопасным лотом и кнопками
                                 notifier.send_trade_signal(
                                     signal_id=sig_id,
                                     symbol=sym,
@@ -353,9 +375,13 @@ def main():
                                     atr=levels["atr"],
                                     risk_reward=levels["risk_reward_ratio"],
                                     session_name=session_name,
+                                    recommended_lot=levels.get("recommended_lot", 0.01),
                                     news_sentiment=news_info["label"],
                                     headline=news_info["top_headline"]
                                 )
+
+                        # Записываем в журнал анализов для кнопки "📊 Статус Бота"
+                        log_candle_analysis(sym, close_p, action, prob, outcome_label, reason)
 
                 except RateLimitError as e:
                     logger.warning(f"[{sym}] Rate limit: {e}. Пауза...")

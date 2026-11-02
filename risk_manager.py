@@ -87,39 +87,56 @@ def get_current_trading_session_name(check_time: datetime = None) -> str:
 def calculate_risk_levels(
     direction: str,
     entry_price: float,
-    atr: float
+    atr: float,
+    symbol: str = "XAU/USD"
 ) -> Dict[str, Any]:
     """
     Рассчитывает динамические уровни Take Profit и Stop Loss на основе ATR.
-    
-    direction: "BUY" или "SELL"
-    entry_price: цена входа
-    atr: текущее значение Average True Range
+    Сконфигурирован на умеренный и безопасный риск (SL = 0.8 * ATR, TP = 1.6 * ATR).
+    Также рассчитывает безопасный объем лота для риска ровно $10.
     """
-    # Защитный минимальный ATR (если вдруг рынок сверхспокоен или данные сжаты)
+    # Защитный минимальный ATR
     safe_atr = max(atr, entry_price * 0.001)
 
     sl_distance = safe_atr * SL_ATR_MULTIPLIER
     tp_distance = safe_atr * TP_ATR_MULTIPLIER
 
+    # Точность знаков после запятой в зависимости от инструмента
+    if "GBP" in symbol or "EUR" in symbol:
+        decimals = 5
+    elif "XAG" in symbol or "SLV" in symbol:
+        decimals = 3
+    else:
+        decimals = 2
+
     if direction == "BUY":
-        stop_loss = round(entry_price - sl_distance, 2)
-        take_profit = round(entry_price + tp_distance, 2)
+        stop_loss = round(entry_price - sl_distance, decimals)
+        take_profit = round(entry_price + tp_distance, decimals)
     elif direction == "SELL":
-        stop_loss = round(entry_price + sl_distance, 2)
-        take_profit = round(entry_price - tp_distance, 2)
+        stop_loss = round(entry_price + sl_distance, decimals)
+        take_profit = round(entry_price - tp_distance, decimals)
     else:
         raise ValueError(f"Неизвестное направление сделки: {direction}")
 
-    # Соотношение риск / прибыль (Risk/Reward Ratio)
+    # Расчет рекомендуемого объема для риска ровно $10 на сделку в Trading 212
+    recommended_lot = 0.01
+    if "XAU" in symbol or "GOLD" in symbol.upper():
+        # Золото: 1 контракт = 100 унций (или 1 унция на Trading 212 CFD)
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100.0, 1.0), 2))
+    elif "GBP" in symbol:
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance * 100000.0, 1.0), 2))
+    else:
+        recommended_lot = max(0.01, round(10.0 / max(sl_distance, 1.0), 2))
+
     risk_reward_ratio = round(tp_distance / sl_distance, 2)
 
     return {
-        "entry_price": round(entry_price, 2),
+        "entry_price": round(entry_price, decimals),
         "stop_loss": stop_loss,
         "take_profit": take_profit,
-        "atr": round(safe_atr, 2),
-        "sl_distance": round(sl_distance, 2),
-        "tp_distance": round(tp_distance, 2),
-        "risk_reward_ratio": f"1:{risk_reward_ratio}"
+        "atr": round(safe_atr, decimals),
+        "sl_distance": round(sl_distance, decimals),
+        "tp_distance": round(tp_distance, decimals),
+        "risk_reward_ratio": f"1:{risk_reward_ratio}",
+        "recommended_lot": recommended_lot
     }

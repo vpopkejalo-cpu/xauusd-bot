@@ -37,13 +37,14 @@ else:
         SYMBOLS = DEFAULT_SYMBOLS
 
 SYMBOL_NAMES = {
-    "XAU/USD": "XAU/USD (Золото)",
-    "XAG/USD": "XAG/USD (Серебро)",
-    "GBP/USD": "GBP/USD (Британский фунт)",
-    "QQQ": "TECH100 (Индекс Nasdaq)",
-    "TECH100": "TECH100 (Индекс Nasdaq)",
-    "BNO": "BRENT (Нефть)",
-    "BRENT": "BRENT (Нефть)"
+    "XAU/USD": "Gold (Trading 212: XAU/USD)",
+    "SLV": "Silver (Trading 212: XAG/USD)",
+    "XAG/USD": "Silver (Trading 212: XAG/USD)",
+    "GBP/USD": "GBP/USD (Trading 212: GBP/USD)",
+    "QQQ": "TECH100 (Nasdaq ETF QQQ)",
+    "TECH100": "TECH100 (Nasdaq ETF QQQ)",
+    "BNO": "BRENT (Oil ETF BNO)",
+    "BRENT": "BRENT (Oil ETF BNO)"
 }
 
 SYMBOL = SYMBOLS[0]  # основной символ по умолчанию
@@ -54,10 +55,10 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))  # каж
 MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.60"))  # Минимальная вероятность 60%
 RETRAIN_INTERVAL_HOURS = int(os.getenv("RETRAIN_INTERVAL_HOURS", "24"))  # Переобучение раз в сутки
 
-# Настройки управления рисками (ATR)
+# Настройки управления рисками (ATR) - Умеренный защитный режим
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
-SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "1.5"))  # SL = 1.5 * ATR
-TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "2.5"))  # TP = 2.5 * ATR
+SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "0.8"))  # Короткий защитный SL = 0.8 * ATR
+TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "1.6"))  # Реалистичный TP = 1.6 * ATR (R:R = 1:2)
 
 # Фильтр времени: Азиатская сессия (23:00 – 08:00 GMT)
 FILTER_ASIAN_SESSION = os.getenv("FILTER_ASIAN_SESSION", "true").lower() in ("true", "1", "yes")

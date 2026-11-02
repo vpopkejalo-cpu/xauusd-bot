@@ -75,8 +75,137 @@ def init_db():
             )
         """)
         
+        # Таблица истории анализов свечей (для прозрачности и кнопки Статус)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                close_price REAL NOT NULL,
+                action TEXT NOT NULL,
+                probability REAL NOT NULL,
+                outcome TEXT NOT NULL,
+                details TEXT
+            )
+        """)
+
+        # Таблица настроек бота (Пауза / Старт и др.)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
+        # По умолчанию бот не на паузе
+        cursor.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('is_paused', 'false')")
+
         conn.commit()
     logger.info("База данных SQLite успешно инициализирована.")
+
+
+def log_candle_analysis(
+    symbol: str,
+    close_price: float,
+    action: str,
+    probability: float,
+    outcome: str,
+    details: str = ""
+):
+    """Записывает результат каждого проведенного анализа свечи."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO analysis_logs (created_at, symbol, close_price, action, probability, outcome, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.utcnow().isoformat(),
+            symbol,
+            close_price,
+            action,
+            probability,
+            outcome,
+            details
+        ))
+        conn.commit()
+
+
+def get_recent_analyses(limit: int = 5) -> List[Dict[str, Any]]:
+    """Возвращает последние N анализов рынка."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM analysis_logs
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_bot_paused(is_paused: bool):
+    """Устанавливает статус паузы бота в базе данных."""
+    val = "true" if is_paused else "false"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO bot_settings (key, value) VALUES ('is_paused', ?)
+            ON CONFLICT(key) DO UPDATE SET value = ?
+        """, (val, val))
+        conn.commit()
+
+
+def is_bot_paused() -> bool:
+    """Проверяет, включена ли пользователем пауза бота."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'is_paused'")
+        row = cursor.fetchone()
+        if row:
+            return row["value"].lower() == "true"
+        return False
+
+
+def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Рассчитывает статистику винрейта и точности рекомендаций за указанный период (в днях).
+    Если period_days is None — рассчитывает за всё время.
+    """
+    from datetime import timedelta
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if period_days is not None:
+            since = (datetime.utcnow() - timedelta(days=period_days)).isoformat()
+            cursor.execute("SELECT * FROM signals WHERE created_at >= ?", (since,))
+        else:
+            cursor.execute("SELECT * FROM signals")
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    total_signals = len(rows)
+    wins = sum(1 for r in rows if r["status"] == "TP_HIT")
+    losses = sum(1 for r in rows if r["status"] == "SL_HIT")
+    expired = sum(1 for r in rows if r["status"] == "EXPIRED")
+    manual = sum(1 for r in rows if r["status"] == "MANUAL_CLOSE")
+    skipped = sum(1 for r in rows if r["status"] == "SKIPPED")
+    open_count = sum(1 for r in rows if r["status"] == "OPEN")
+
+    finished = wins + losses
+    winrate = round((wins / finished * 100), 1) if finished > 0 else 0.0
+    total_pnl = sum((r["pnl"] or 0.0) for r in rows if r["status"] in ("TP_HIT", "SL_HIT"))
+
+    return {
+        "period_days": period_days,
+        "total_signals": total_signals,
+        "wins": wins,
+        "losses": losses,
+        "expired": expired,
+        "manual": manual,
+        "skipped": skipped,
+        "open_count": open_count,
+        "finished": finished,
+        "winrate": winrate,
+        "total_pnl": round(total_pnl, 2)
+    }
 
 
 def save_candles(df: pd.DataFrame, symbol: str = "XAU/USD"):
