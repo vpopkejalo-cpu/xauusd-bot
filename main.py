@@ -34,7 +34,6 @@ from database import (
     load_candles_from_db,
     save_signal,
     get_open_signals,
-    update_signal_status,
     log_candle_analysis,
     is_bot_paused,
     consume_retrain_request,
@@ -102,58 +101,6 @@ def handle_shutdown_signal(signum, frame):
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
-
-def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Optional[str] = None):
-    """
-    Проверяет открытые сигналы на предмет достижения Take Profit или Stop Loss.
-    Сделки живут до срабатывания TP/SL или ручного закрытия пользователем.
-    Автоматическое закрытие по времени отключено.
-    """
-    open_signals = get_open_signals()
-    if not open_signals:
-        return
-
-    high = float(current_candle["high"])
-    low = float(current_candle["low"])
-
-    for sig in open_signals:
-        sig_symbol = sig.get("symbol", "XAU/USD")
-        if symbol and sig_symbol != symbol:
-            continue
-
-        sig_id = sig["id"]
-        direction = sig["direction"]
-        entry = float(sig["entry_price"])
-        tp = float(sig["take_profit"])
-        sl = float(sig["stop_loss"])
-
-        status = None
-        exit_price = None
-        pnl = 0.0
-
-        if direction == "BUY":
-            if high >= tp:
-                status = "TP_HIT"
-                exit_price = tp
-                pnl = tp - entry
-            elif low <= sl:
-                status = "SL_HIT"
-                exit_price = sl
-                pnl = sl - entry
-        elif direction == "SELL":
-            if low <= tp:
-                status = "TP_HIT"
-                exit_price = tp
-                pnl = entry - tp
-            elif high >= sl:
-                status = "SL_HIT"
-                exit_price = sl
-                pnl = entry - sl
-
-        if status:
-            logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) закрыта: {status}. PnL: {pnl:.2f}")
-            update_signal_status(sig_id, status, exit_price, pnl)
-            notifier.send_trade_outcome(sig_id, direction, status, pnl, exit_price)
 
 
 def main():
@@ -262,10 +209,7 @@ def main():
                     # Кэшируем актуальную цену для отображения в "Статус Бота"
                     notifier.update_price(sym, close_p)
 
-                    # 2. Проверка открытых позиций по этому активу
-                    check_active_trades(latest_candle, notifier, symbol=sym)
-
-                    # 3. Проверяем закрытие новой свечи
+                    # 2. Проверяем закрытие новой свечи
                     if latest_timestamp != last_processed_timestamps.get(sym):
                         last_processed_timestamps[sym] = latest_timestamp
                         logger.info(f"[{sym}] Анализ свечи: {latest_timestamp} | Close: {close_p:.2f} | ATR: {atr_val:.2f}")
@@ -292,17 +236,31 @@ def main():
                         logger.info(f"[{sym}] ML Решение: {action} ({prob:.1%}) - {reason}")
                         outcome_label = f"ML {action}"
 
-                        # 7. ТРЕНДОВЫЙ ФИЛЬТР (EMA 50)
+                        # 7. ТРЕНДОВЫЙ И СТРУКТУРНЫЙ ФИЛЬТР (EMA 21/50 + RSI)
                         if action in ("BUY", "SELL"):
                             ema_50 = float(latest_candle.get("ema_50", close_p))
-                            if action == "BUY" and close_p < ema_50:
-                                logger.info(f"[{sym}] Сигнал BUY отфильтрован: цена {close_p:.2f} ниже EMA50 {ema_50:.2f} (нисходящий тренд).")
-                                action = "HOLD"
-                                outcome_label = "❌ Ниже EMA50 (нисходящий тренд)"
-                            elif action == "SELL" and close_p > ema_50:
-                                logger.info(f"[{sym}] Сигнал SELL отфильтрован: цена {close_p:.2f} выше EMA50 {ema_50:.2f} (восходящий тренд).")
-                                action = "HOLD"
-                                outcome_label = "❌ Выше EMA50 (восходящий тренд)"
+                            ema_21 = float(latest_candle.get("ema_21", close_p))
+                            rsi_val = float(latest_candle.get("rsi", 50.0))
+
+                            if action == "BUY":
+                                if close_p < ema_50 or ema_21 < ema_50:
+                                    logger.info(f"[{sym}] BUY отфильтрован: цена ниже EMA50 или нисходящий веер EMA.")
+                                    action = "HOLD"
+                                    outcome_label = "❌ Против тренда EMA50"
+                                elif rsi_val > 68.0:
+                                    logger.info(f"[{sym}] BUY отфильтрован: RSI {rsi_val:.1f} перекуплен (>68). Вход на пике опасен.")
+                                    action = "HOLD"
+                                    outcome_label = f"❌ Перекуплен RSI={rsi_val:.1f}"
+
+                            elif action == "SELL":
+                                if close_p > ema_50 or ema_21 > ema_50:
+                                    logger.info(f"[{sym}] SELL отфильтрован: цена выше EMA50 или восходящий веер EMA.")
+                                    action = "HOLD"
+                                    outcome_label = "❌ Против тренда EMA50"
+                                elif rsi_val < 32.0:
+                                    logger.info(f"[{sym}] SELL отфильтрован: RSI {rsi_val:.1f} перепродан (<32). Шорт на дне опасен.")
+                                    action = "HOLD"
+                                    outcome_label = f"❌ Перепродан RSI={rsi_val:.1f}"
 
                         # 8. ПОДТВЕРЖДЕНИЕ НОВОСТНЫМ САНТИМЕНТОМ
                         # Порог ±0.5: блокируем только при явно сильном противоположном фоне

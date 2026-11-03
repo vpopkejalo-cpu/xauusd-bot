@@ -32,6 +32,22 @@ from database import (
 logger = logging.getLogger(__name__)
 
 
+def format_efficiency_rating(winrate: float, finished_count: int) -> str:
+    """Возвращает честный и профессиональный рейтинг эффективности торговли."""
+    if finished_count == 0:
+        return "⚪ (Пока нет закрытых сделок)"
+    if winrate >= 75:
+        return "⭐⭐⭐⭐⭐ (Отличный результат)"
+    elif winrate >= 60:
+        return "⭐⭐⭐⭐ (Хороший прибыльный результат)"
+    elif winrate >= 50:
+        return "⭐⭐⭐ (Средний / Около безубытка)"
+    elif winrate >= 40:
+        return "⭐⭐ (Низкий — требует оптимизации) ⚠️"
+    else:
+        return "⭐ (Критически низкий / Убыточный) 🛑"
+
+
 def get_main_keyboard(is_paused: bool = False) -> Dict:
     """Возвращает постоянную нативную клавиатуру внизу экрана Telegram."""
     toggle_btn = "▶️ Запустить бота" if is_paused else "⏸ Поставить на паузу"
@@ -364,14 +380,8 @@ class TelegramNotifier:
             stats = get_winrate_stats(days_val)
 
             winrate = stats["winrate"]
-            if winrate >= 70:
-                rating = "⭐⭐⭐⭐⭐ (Отличный)"
-            elif winrate >= 50:
-                rating = "⭐⭐⭐⭐ (Хороший)"
-            elif winrate > 0:
-                rating = "⭐⭐⭐ (Удовлетворительный)"
-            else:
-                rating = "⚪ (Недостаточно закрытых сделок)"
+            finished_cnt = stats.get("finished", 0)
+            rating = format_efficiency_rating(winrate, finished_cnt)
 
             pnl_val = stats["total_pnl"]
             pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
@@ -696,14 +706,8 @@ class TelegramNotifier:
             try:
                 stats = get_winrate_stats(1)
                 winrate = stats["winrate"]
-                if winrate >= 70:
-                    rating = "⭐⭐⭐⭐⭐ (Отличный)"
-                elif winrate >= 50:
-                    rating = "⭐⭐⭐⭐ (Хороший)"
-                elif winrate > 0:
-                    rating = "⭐⭐⭐ (Удовлетворительный)"
-                else:
-                    rating = "⚪ (Недостаточно закрытых сделок)"
+                finished_cnt = stats.get("finished", 0)
+                rating = format_efficiency_rating(winrate, finished_cnt)
 
                 pnl_val = stats["total_pnl"]
                 pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"

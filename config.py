@@ -61,8 +61,8 @@ TIMEFRAME = os.getenv("TIMEFRAME", "5min").strip()  # 5min для динамич
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))  # каждые 5 минут
 
 # Настройки Machine Learning
-# Качественный защитный порог 60% — сигнал генерируется только при высокой математической вероятности
-MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.60"))
+# Защитный порог 65% — отсекает шум и генерирует сигналы только при реальном перевесе вероятности
+MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.65"))
 TRAINING_CANDLES_COUNT = int(os.getenv("TRAINING_CANDLES_COUNT", "800"))  # Объем выборки на актив для обучения
 RETRAIN_INTERVAL_HOURS = int(os.getenv("RETRAIN_INTERVAL_HOURS", "4"))  # Переобучение каждые 4 часа
 

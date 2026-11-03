@@ -51,9 +51,10 @@ def calculate_indicators(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame
     data["atr"] = tr.rolling(window=atr_period).mean()
 
     # 4. Схождение/расхождение скользящих средних MACD (12, 26, 9)
+    # Нормализуем в % от цены для честной сопоставимости разных активов в ML
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
-    data["macd"] = ema12 - ema26
+    data["macd"] = (ema12 - ema26) / close * 100
     data["macd_signal"] = data["macd"].ewm(span=9, adjust=False).mean()
     data["macd_hist"] = data["macd"] - data["macd_signal"]
 
