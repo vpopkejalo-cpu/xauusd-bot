@@ -37,7 +37,8 @@ from database import (
     update_signal_status,
     log_candle_analysis,
     is_bot_paused,
-    consume_retrain_request
+    consume_retrain_request,
+    set_signal_message_id
 )
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
@@ -353,7 +354,7 @@ def main():
                                 outcome_label = f"✅ Сигнал #{sig_id} {action}"
 
                                 # Отправка в Telegram с безопасным лотом и кнопками
-                                notifier.send_trade_signal(
+                                sent_msg_id = notifier.send_trade_signal(
                                     signal_id=sig_id,
                                     symbol=sym,
                                     direction=action,
@@ -368,6 +369,11 @@ def main():
                                     news_sentiment=news_info["label"],
                                     headline=news_info["top_headline"]
                                 )
+                                if sent_msg_id and sig_id:
+                                    try:
+                                        set_signal_message_id(sig_id, sent_msg_id)
+                                    except Exception as e:
+                                        logger.warning(f"Не удалось связать message_id с сигналом #{sig_id}: {e}")
 
                         # Записываем в журнал анализов для кнопки "📊 Статус Бота"
                         log_candle_analysis(sym, close_p, action, prob, outcome_label, reason)

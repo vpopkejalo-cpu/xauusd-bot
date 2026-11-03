@@ -114,9 +114,14 @@ def init_db():
                     status TEXT DEFAULT 'OPEN',
                     closed_at TEXT,
                     exit_price REAL,
-                    pnl REAL
+                    pnl REAL,
+                    message_id BIGINT
                 )
             """)
+            try:
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
+            except Exception:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -181,9 +186,17 @@ def init_db():
                     status TEXT DEFAULT 'OPEN',
                     closed_at TEXT,
                     exit_price REAL,
-                    pnl REAL
+                    pnl REAL,
+                    message_id INTEGER
                 )
             """)
+            try:
+                cursor.execute("PRAGMA table_info(signals)")
+                cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
+                if "message_id" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
+            except Exception:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -450,10 +463,17 @@ def save_signal(
             return cursor.lastrowid
 
 
+def set_signal_message_id(signal_id: int, message_id: int):
+    """Привязывает ID сообщения в Telegram к записи сигнала в базе данных."""
+    sql = _adapt_sql("UPDATE signals SET message_id = ? WHERE id = ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (int(message_id), int(signal_id)))
+
+
 def get_open_signals() -> List[Dict[str, Any]]:
     """Возвращает список всех активных (не закрытых) сигналов."""
     with get_db() as cursor:
-        cursor.execute("SELECT * FROM signals WHERE status = 'OPEN'")
+        cursor.execute("SELECT * FROM signals WHERE status = 'OPEN' ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 

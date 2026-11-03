@@ -25,7 +25,8 @@ from database import (
     get_winrate_stats,
     set_bot_paused,
     is_bot_paused,
-    request_retrain
+    request_retrain,
+    set_signal_message_id
 )
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,13 @@ class TelegramNotifier:
         """Кэширует последнюю цену инструмента для отображения в Статусе."""
         self.latest_prices[symbol] = price
 
-    def send_raw_message(self, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = "HTML") -> Optional[int]:
+    def send_raw_message(
+        self,
+        text: str,
+        reply_markup: Optional[Dict] = None,
+        parse_mode: str = "HTML",
+        reply_to_message_id: Optional[int] = None
+    ) -> Optional[int]:
         """Отправляет текстовое сообщение в Telegram через метод sendMessage."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram токен или Chat ID не заданы. Сообщение не отправлено.")
@@ -92,6 +99,12 @@ class TelegramNotifier:
             "parse_mode": parse_mode,
             "disable_web_page_preview": True
         }
+        if reply_to_message_id:
+            payload["reply_parameters"] = {
+                "message_id": int(reply_to_message_id),
+                "allow_sending_without_reply": True
+            }
+
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         else:
@@ -106,6 +119,15 @@ class TelegramNotifier:
                     msg_id = data["result"]["message_id"]
                     logger.info(f"Сообщение #{msg_id} успешно доставлено в Telegram.")
                     return msg_id
+
+            # Резервная попытка без reply_parameters при ошибке привязки
+            if reply_to_message_id and "reply_parameters" in payload:
+                logger.warning(f"Ошибка при отправке с reply_parameters ({response.text}), пробуем без привязки...")
+                payload.pop("reply_parameters", None)
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200 and response.json().get("ok"):
+                    return response.json()["result"]["message_id"]
+
             logger.error(f"Ошибка отправки в Telegram: HTTP {response.status_code}, Ответ: {response.text}")
             return None
         except requests.RequestException as e:
@@ -237,7 +259,13 @@ class TelegramNotifier:
             ]
         }
 
-        return self.send_raw_message(message, reply_markup=reply_markup)
+        msg_id = self.send_raw_message(message, reply_markup=reply_markup)
+        if msg_id and signal_id:
+            try:
+                set_signal_message_id(signal_id, msg_id)
+            except Exception as e:
+                logger.warning(f"Не удалось связать message_id с сигналом #{signal_id}: {e}")
+        return msg_id
 
     def send_trade_outcome(
         self,
@@ -364,8 +392,22 @@ class TelegramNotifier:
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"<i>Статистика строится строго по фактическим результатам ваших сделок.</i>"
             )
+            open_sigs = get_open_signals()
+            inline_rows = []
+            if open_sigs:
+                report += "\n\n<b>⏳ Активные позиции в рынке:</b>\n"
+                for s in open_sigs:
+                    sym = s.get('symbol', 'XAU/USD')
+                    dir_txt = s['direction']
+                    report += f"• #{s['id']} <b>{sym}</b> {dir_txt} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})\n"
+                    inline_rows.append([
+                        {"text": f"🎯 #{s['id']} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
+                    ])
+                report += "\n<i>👇 Нажмите на кнопку сделки ниже, чтобы открыть её карточку:</i>"
+
             self.answer_callback_query(cb_id, f"Винрейт за {period_name}: {winrate}%", show_alert=False)
-            self.send_raw_message(report)
+            reply_markup = {"inline_keyboard": inline_rows} if inline_rows else None
+            self.send_raw_message(report, reply_markup=reply_markup)
             return
 
         # 2. Сброс зависших сделок из кнопки статуса
@@ -375,7 +417,78 @@ class TelegramNotifier:
             self.send_raw_message(f"🧹 <b>Сброс выполнен!</b> Закрыто зависших позиций: <b>{count}</b>. Бот свободен.")
             return
 
-        # 3. Интерактивные действия по сигналам
+        # 3. Быстрый переход прямо к карточке сделки
+        if cb_data.startswith("goto_"):
+            sig_id = int(cb_data.split("_")[1]) if len(cb_data.split("_")) > 1 and cb_data.split("_")[1].isdigit() else 0
+            sig = get_signal_by_id(sig_id)
+            if not sig:
+                self.answer_callback_query(cb_id, "Сделка не найдена в базе.", show_alert=True)
+                return
+
+            self.answer_callback_query(cb_id, f"Открываем карточку #{sig_id}...", show_alert=False)
+
+            sym = sig.get("symbol", "XAU/USD")
+            display_name = SYMBOL_NAMES.get(sym, sym)
+            direction = sig.get("direction", "BUY")
+            dir_emoji = "🟢" if direction.upper() == "BUY" else "🔴"
+            dir_name = "ПОКУПКА (BUY)" if direction.upper() == "BUY" else "ПРОДАЖА (SELL)"
+            prob = sig.get("probability", 0.6)
+            calibrated_prob = min(max(prob, 0.55), 0.88)
+            created_dt = sig.get("created_at", "")[:19].replace("T", " ")
+
+            status = sig.get("status", "OPEN")
+            is_open = status == "OPEN"
+
+            if is_open:
+                header = f"📍 <b>КАРТОЧКА ОТКРЫТОЙ СДЕЛКИ: #{sig_id}</b>"
+                footer = (
+                    "<i>👆 Нажмите на цитату-ответ вверху этого сообщения, чтобы Telegram перенес вас прямо к первому сигналу!</i>\n\n"
+                    "👇 <b>Либо зафиксируйте результат сделки прямо здесь:</b>"
+                )
+                markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{sig_id}"},
+                            {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{sig_id}"}
+                        ],
+                        [
+                            {"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{sig_id}"}
+                        ]
+                    ]
+                }
+            else:
+                status_ru = {
+                    "TP_HIT": "✅ Закрыта в плюс (TP)",
+                    "SL_HIT": "🛑 Закрыта в минус (SL)",
+                    "EXPIRED": "⌛ Истекло время",
+                    "MANUAL_CLOSE": "✖️ Закрыта вручную",
+                    "MANUAL_RESET": "🧹 Сброшена",
+                    "SKIPPED": "⏭ Пропущена"
+                }.get(status, status)
+                header = f"📋 <b>КАРТОЧКА СДЕЛКИ: #{sig_id} ({status_ru})</b>"
+                footer = f"<i>Сделка уже закрыта. Результат: <code>{sig.get('pnl', 0.0)}</code> пунктов.</i>\n<i>👆 Нажмите на цитату вверху, чтобы перейти к оригинальному сигналу в истории.</i>"
+                markup = None
+
+            card_text = (
+                f"{header}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🏷 <b>Инструмент:</b> <b>{display_name}</b>\n"
+                f"🎯 <b>Направление:</b> {dir_name} {dir_emoji}\n\n"
+                f"💵 <b>Цена входа:</b> <code>{sig.get('entry_price')}</code>\n"
+                f"🏆 <b>Take Profit:</b> <code>{sig.get('take_profit')}</code>\n"
+                f"🛑 <b>Stop Loss:</b> <code>{sig.get('stop_loss')}</code>\n"
+                f"🌊 <b>Волатильность (ATR):</b> <code>${sig.get('atr')}</code>\n"
+                f"🤖 <b>Уверенность:</b> <b>{calibrated_prob:.1%}</b>\n"
+                f"⏱ <b>Время открытия:</b> <code>{created_dt} UTC</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"{footer}"
+            )
+
+            orig_msg_id = sig.get("message_id")
+            self.send_raw_message(card_text, reply_markup=markup, reply_to_message_id=orig_msg_id)
+            return
+
+        # 4. Интерактивные действия по сигналам
         parts = cb_data.split("_")
         action = parts[0]
         sig_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -415,6 +528,17 @@ class TelegramNotifier:
             new_text = orig_text + "\n\n🎉 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В ПРИБЫЛЬ (TP)!</b> ✅\n<i>Результат учтен в статистике винрейта. Бот готов к новым сигналам.</i>"
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
 
+            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
+                try:
+                    self.edit_message_text(
+                        chat_id,
+                        sig["message_id"],
+                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) ЗАКРЫТ:</b>\n\n🎉 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В ПРИБЫЛЬ (TP)!</b> ✅\n<i>Результат учтен в статистике винрейта.</i>",
+                        reply_markup=None
+                    )
+                except Exception as e:
+                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
+
         elif action == "loss":
             self.answer_callback_query(cb_id, "Убыток зафиксирован. Учтено в статистике качества.", show_alert=True)
             sig = get_signal_by_id(sig_id)
@@ -425,12 +549,35 @@ class TelegramNotifier:
             new_text = orig_text + "\n\n🛑 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В УБЫТОК (SL)</b> ⚠️\n<i>Результат записан в статистику винрейта. Бот разблокирован.</i>"
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
 
+            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
+                try:
+                    self.edit_message_text(
+                        chat_id,
+                        sig["message_id"],
+                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) ЗАКРЫТ:</b>\n\n🛑 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В УБЫТОК (SL)</b> ⚠️\n<i>Результат записан в статистику винрейта.</i>",
+                        reply_markup=None
+                    )
+                except Exception as e:
+                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
+
         elif action == "manual":
             self.answer_callback_query(cb_id, "Сделка закрыта вручную.", show_alert=False)
             if sig_id:
                 update_signal_status(sig_id, "MANUAL_CLOSE", 0.0, 0.0)
             new_text = orig_text + "\n\n✖️ <b>РЕЗУЛЬТАТ: Закрыто вручную / Сброшено</b>\n<i>Бот готов к новым сигналам.</i>"
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
+
+            sig = get_signal_by_id(sig_id)
+            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
+                try:
+                    self.edit_message_text(
+                        chat_id,
+                        sig["message_id"],
+                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) СБРОШЕН:</b>\n\n✖️ <b>Закрыто вручную / Сброшено</b>",
+                        reply_markup=None
+                    )
+                except Exception as e:
+                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
 
     def _handle_command(self, msg: Dict):
         text = msg.get("text", "").strip()
@@ -453,11 +600,22 @@ class TelegramNotifier:
 
             # Открытые сделки
             open_sigs = get_open_signals()
+            inline_buttons = []
             if not open_sigs:
                 deals_block = "<i>Открытых сделок нет. Бот свободен.</i>"
+                action_hint = "<i>Чтобы сбросить зависшие сделки, нажмите кнопку ниже:</i>"
             else:
                 deals_lines = [f"• #{s['id']} <b>{s.get('symbol', 'XAU/USD')}</b> {s['direction']} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})" for s in open_sigs]
                 deals_block = "\n".join(deals_lines)
+                action_hint = "<i>👇 Нажмите на сделку ниже, чтобы сразу открыть её карточку:</i>"
+                for s in open_sigs:
+                    sym = s.get('symbol', 'XAU/USD')
+                    inline_buttons.append([
+                        {"text": f"🎯 #{s['id']} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                    ])
+
+            inline_buttons.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
+            inline_reset = {"inline_keyboard": inline_buttons}
 
             # Последние 6 анализов свечей (по числу активов)
             recent = get_recent_analyses(6)
@@ -483,14 +641,9 @@ class TelegramNotifier:
                 f"{deals_block}\n\n"
                 "🔍 <b>Последние 6 анализов рынка:</b>\n"
                 f"{analyses_block}\n\n"
-                "<i>Чтобы сбросить зависшие сделки, нажмите кнопку ниже:</i>"
+                f"{action_hint}"
             )
 
-            inline_reset = {
-                "inline_keyboard": [
-                    [{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}]
-                ]
-            }
             self.send_raw_message(reply, reply_markup=inline_reset)
 
         # 2. Кнопка "📈 Винрейт"
@@ -516,9 +669,16 @@ class TelegramNotifier:
                     "⚠️ <b>ПАУЗА НЕДОСТУПНА — ЕСТЬ АКТИВНЫЕ СДЕЛКИ!</b>\n\n"
                     "Сначала закройте или сбросьте все открытые позиции:\n\n"
                     f"{deals_info}\n\n"
-                    "👉 Нажмите <b>🧹 Сброс сделок</b> — и затем снова поставьте на паузу."
+                    "👉 Нажмите на сделку ниже, чтобы перейти к её карточке, либо нажмите <b>🧹 Сброс сделок</b>:"
                 )
-                self.send_raw_message(block_msg, reply_markup=get_main_keyboard(is_paused=False))
+                pause_btns = []
+                for s in open_sigs:
+                    sym = s.get('symbol', 'XAU/USD')
+                    pause_btns.append([
+                        {"text": f"🎯 #{s['id']} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                    ])
+                pause_btns.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
+                self.send_raw_message(block_msg, reply_markup={"inline_keyboard": pause_btns})
                 return
 
             # Ставим бота на паузу
