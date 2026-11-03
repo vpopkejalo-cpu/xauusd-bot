@@ -261,7 +261,7 @@ def set_bot_paused(is_paused: bool):
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     """)
     with get_db() as cursor:
-        cursor.execute(sql, (val, val))
+        cursor.execute(sql, ("is_paused", val))
 
 
 def is_bot_paused() -> bool:

@@ -23,6 +23,12 @@ TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
+# Ключи для новостного анализа (опциональны — бот работает без них через Google RSS)
+# Finnhub: https://finnhub.io — бесплатный план 60 запросов/мин
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+# NewsAPI: https://newsapi.org — бесплатный план 100 запросов/день
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
+
 # Параметры торговых инструментов (Мульти-активы: 6 ключевых инструментов)
 DEFAULT_SYMBOLS = ["XAU/USD", "XAG/USD", "GBP/USD", "TECH100", "BRENT", "NATGAS"]
 raw_symbols = os.getenv("SYMBOLS", "").strip()

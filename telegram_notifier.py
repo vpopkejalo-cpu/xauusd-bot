@@ -505,6 +505,23 @@ class TelegramNotifier:
 
         # 3. Кнопка "⏸ Поставить на паузу" / "Стоп"
         elif "пауз" in lower_text or lower_text in ("стоп", "stop"):
+            # Блокируем паузу если есть открытые сделки
+            open_sigs = get_open_signals()
+            if open_sigs:
+                deals_info = "\n".join([
+                    f"• #{s['id']} <b>{s.get('symbol', 'XAU/USD')}</b> {s['direction']} @ <code>{s['entry_price']}</code>"
+                    for s in open_sigs
+                ])
+                block_msg = (
+                    "⚠️ <b>ПАУЗА НЕДОСТУПНА — ЕСТЬ АКТИВНЫЕ СДЕЛКИ!</b>\n\n"
+                    "Сначала закройте или сбросьте все открытые позиции:\n\n"
+                    f"{deals_info}\n\n"
+                    "👉 Нажмите <b>🧹 Сброс сделок</b> — и затем снова поставьте на паузу."
+                )
+                self.send_raw_message(block_msg, reply_markup=get_main_keyboard(is_paused=False))
+                return
+
+            # Ставим бота на паузу
             set_bot_paused(True)
             msg_text = (
                 "⏸ <b>БОТ ПОСТАВЛЕН НА ПАУЗУ</b>\n\n"
@@ -514,6 +531,39 @@ class TelegramNotifier:
                 "<i>Когда проснетесь, просто нажмите кнопку <b>▶️ Запустить бота</b> внизу экрана.</i>"
             )
             self.send_raw_message(msg_text, reply_markup=get_main_keyboard(is_paused=True))
+
+            # Автоматически отправляем статистику винрейта за сегодня
+            try:
+                stats = get_winrate_stats(1)
+                winrate = stats["winrate"]
+                if winrate >= 70:
+                    rating = "⭐⭐⭐⭐⭐ (Отличный)"
+                elif winrate >= 50:
+                    rating = "⭐⭐⭐⭐ (Хороший)"
+                elif winrate > 0:
+                    rating = "⭐⭐⭐ (Удовлетворительный)"
+                else:
+                    rating = "⚪ (Недостаточно закрытых сделок)"
+
+                pnl_val = stats["total_pnl"]
+                pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
+
+                today_report = (
+                    "📊 <b>ИТОГИ СЕГОДНЯШНЕГО ДНЯ:</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 <b>Винрейт за день:</b> <b>{winrate}%</b>\n"
+                    f"🏅 <b>Оценка:</b> {rating}\n\n"
+                    f"📊 <b>Сигналов выдано:</b> {stats['total_signals']}\n"
+                    f"✅ <b>Take Profit:</b> {stats['wins']}\n"
+                    f"🛑 <b>Stop Loss:</b> {stats['losses']}\n"
+                    f"✖️ <b>Сброшено вручную:</b> {stats['manual']}\n\n"
+                    f"💰 <b>Суммарный результат:</b> <code>{pnl_sign} пунктов</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    "<i>До встречи! 🌙</i>"
+                )
+                self.send_raw_message(today_report, reply_markup=get_main_keyboard(is_paused=True))
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статистику за день при паузе: {e}")
 
         # 4. Кнопка "▶️ Запустить бота" / "Старт"
         elif "запустить" in lower_text or lower_text in ("старт", "start", "/start"):

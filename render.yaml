@@ -10,14 +10,24 @@ services:
       - key: SYMBOL
         value: XAU/USD
       - key: TIMEFRAME
-        value: 15min
+        value: 5min
       - key: MIN_PROBABILITY
         value: "0.60"
       - key: FILTER_ASIAN_SESSION
-        value: "true"
+        value: "false"
+      - key: TRAINING_CANDLES_COUNT
+        value: "800"
+      - key: RETRAIN_INTERVAL_HOURS
+        value: "4"
       - key: TWELVE_DATA_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: NEWS_API_KEY
         sync: false

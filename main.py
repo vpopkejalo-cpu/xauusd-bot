@@ -105,7 +105,8 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Optional[str] = None):
     """
     Проверяет открытые сигналы на предмет достижения Take Profit или Stop Loss.
-    Также закрывает устаревшие сделки (старше 4 часов), чтобы не блокировать бота.
+    Сделки живут до срабатывания TP/SL или ручного закрытия пользователем.
+    Автоматическое закрытие по времени отключено.
     """
     open_signals = get_open_signals()
     if not open_signals:
@@ -113,8 +114,6 @@ def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Opti
 
     high = float(current_candle["high"])
     low = float(current_candle["low"])
-    close = float(current_candle["close"])
-    now_utc = datetime.utcnow()
 
     for sig in open_signals:
         sig_symbol = sig.get("symbol", "XAU/USD")
@@ -126,19 +125,6 @@ def check_active_trades(current_candle, notifier: TelegramNotifier, symbol: Opti
         entry = float(sig["entry_price"])
         tp = float(sig["take_profit"])
         sl = float(sig["stop_loss"])
-
-        # Автоматическое закрытие сделок старше 1 часа (для динамичной внутридневной торговли)
-        try:
-            created_dt = datetime.fromisoformat(sig["created_at"])
-            age_hours = (now_utc - created_dt).total_seconds() / 3600.0
-            if age_hours >= 1.0:
-                logger.info(f"Сделка #{sig_id} ({sig_symbol} {direction}) открыта более 1 часа. Автоматически закрываем (EXPIRED).")
-                pnl = (close - entry) if direction == "BUY" else (entry - close)
-                update_signal_status(sig_id, "EXPIRED", close, pnl)
-                notifier.send_raw_message(f"⌛ <b>Сигнал #{sig_id} ({sig_symbol} {direction}) снят с отслеживания (прошло 60 мин).</b>\nБот готов к поиску новых сделок.")
-                continue
-        except Exception as e:
-            logger.warning(f"Ошибка проверки возраста сделки #{sig_id}: {e}")
 
         status = None
         exit_price = None
