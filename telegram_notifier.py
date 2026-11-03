@@ -237,7 +237,7 @@ class TelegramNotifier:
             f"{color_badge} {dir_emoji}\n\n"
             f"🎯 <b>Направление:</b> {dir_name}\n"
             f"💵 <b>Цена входа:</b> <code>{entry_price}</code>\n"
-            f"🛑 <b>Stop Loss:</b> <code>{stop_loss}</code> (короткий защитный)\n"
+            f"🛑 <b>Stop Loss:</b> <code>{stop_loss}</code> (защита от рыночного шума)\n"
             f"🏆 <b>Take Profit:</b> <code>{take_profit}</code>\n"
             f"⚖️ <b>Соотношение R:R:</b> <code>{risk_reward}</code>\n\n"
             f"━━━━━━━━━━━━━━━━━━━\n"

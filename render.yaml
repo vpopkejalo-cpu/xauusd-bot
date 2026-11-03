@@ -19,6 +19,10 @@ services:
         value: "800"
       - key: RETRAIN_INTERVAL_HOURS
         value: "4"
+      - key: SL_ATR_MULTIPLIER
+        value: "1.8"
+      - key: TP_ATR_MULTIPLIER
+        value: "2.2"
       - key: TWELVE_DATA_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN

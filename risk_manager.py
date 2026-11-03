@@ -84,6 +84,42 @@ def get_current_trading_session_name(check_time: datetime = None) -> str:
         return "Азиатская (Низкая ликвидность) ⛩️"
 
 
+# Минимальные защитные дистанции (в пунктах цены) для исключения выбивания случайным рыночным шумом и спредом
+MIN_SL_DISTANCES = {
+    "XAU/USD": 5.0,     # Золото: минимум $5.00 защитного пространства (не ближе 50 пунктов)
+    "GOLD": 5.0,
+    "XAG/USD": 0.25,    # Серебро: минимум $0.25
+    "SILVER": 0.25,
+    "SLV": 0.25,
+    "GBP/USD": 0.0020,  # GBP/USD: минимум 20 пунктов
+    "EUR/USD": 0.0020,
+    "TECH100": 45.0,    # Nasdaq: минимум 45 пунктов
+    "QQQ": 45.0,
+    "BRENT": 0.80,      # Нефть Brent: минимум $0.80
+    "XBR/USD": 0.80,
+    "BNO": 0.80,
+    "NATGAS": 0.06,     # Природный газ: минимум $0.06
+    "NG=F": 0.06
+}
+
+MIN_TP_DISTANCES = {
+    "XAU/USD": 6.5,     # Золото: минимум $6.50
+    "GOLD": 6.5,
+    "XAG/USD": 0.35,
+    "SILVER": 0.35,
+    "SLV": 0.35,
+    "GBP/USD": 0.0025,
+    "EUR/USD": 0.0025,
+    "TECH100": 60.0,
+    "QQQ": 60.0,
+    "BRENT": 1.10,
+    "XBR/USD": 1.10,
+    "BNO": 1.10,
+    "NATGAS": 0.08,
+    "NG=F": 0.08
+}
+
+
 def calculate_risk_levels(
     direction: str,
     entry_price: float,
@@ -91,16 +127,10 @@ def calculate_risk_levels(
     symbol: str = "XAU/USD"
 ) -> Dict[str, Any]:
     """
-    Рассчитывает динамические уровни Take Profit и Stop Loss на основе ATR.
-    Сконфигурирован на умеренный и безопасный риск (SL = 0.8 * ATR, TP = 1.6 * ATR).
+    Рассчитывает динамические уровни Take Profit и Stop Loss на основе ATR с защитой от рыночного шума.
+    Stop Loss вынесен за пределы естественного микро-шума свечей (1.8 * ATR + минимальный порог актива).
     Также рассчитывает безопасный объем лота для риска ровно $10.
     """
-    # Защитный минимальный ATR
-    safe_atr = max(atr, entry_price * 0.001)
-
-    sl_distance = safe_atr * SL_ATR_MULTIPLIER
-    tp_distance = safe_atr * TP_ATR_MULTIPLIER
-
     # Точность знаков после запятой в зависимости от инструмента
     if "GBP" in symbol or "EUR" in symbol:
         decimals = 5
@@ -110,6 +140,34 @@ def calculate_risk_levels(
         decimals = 3
     else:
         decimals = 2
+
+    # Защитный минимальный ATR (не менее 0.15% от цены актива)
+    safe_atr = max(atr, entry_price * 0.0015)
+
+    # Динамический расчет расстояний по ATR
+    raw_sl = safe_atr * SL_ATR_MULTIPLIER
+    raw_tp = safe_atr * TP_ATR_MULTIPLIER
+
+    # Фильтр рыночного шума: гарантируем, что SL не окажется внутри обычного спреда или 1-минутной свечи
+    sym_upper = symbol.upper()
+    min_sl = entry_price * 0.0025
+    for k, v in MIN_SL_DISTANCES.items():
+        if k in sym_upper:
+            min_sl = v
+            break
+
+    min_tp = entry_price * 0.0035
+    for k, v in MIN_TP_DISTANCES.items():
+        if k in sym_upper:
+            min_tp = v
+            break
+
+    sl_distance = max(raw_sl, min_sl)
+    tp_distance = max(raw_tp, min_tp)
+
+    # Гарантируем адекватное соотношение Risk/Reward (цель должна стоить риска)
+    if tp_distance < sl_distance * 1.15:
+        tp_distance = round(sl_distance * 1.25, decimals)
 
     if direction == "BUY":
         stop_loss = round(entry_price - sl_distance, decimals)

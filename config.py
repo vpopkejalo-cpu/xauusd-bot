@@ -66,10 +66,10 @@ MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.60"))
 TRAINING_CANDLES_COUNT = int(os.getenv("TRAINING_CANDLES_COUNT", "800"))  # Объем выборки на актив для обучения
 RETRAIN_INTERVAL_HOURS = int(os.getenv("RETRAIN_INTERVAL_HOURS", "4"))  # Переобучение каждые 4 часа
 
-# Настройки управления рисками (ATR) - Умеренный защитный режим
+# Настройки управления рисками (ATR) - Защита от рыночного шума
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
-SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "0.8"))  # Короткий защитный SL = 0.8 * ATR
-TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "1.6"))  # Реалистичный TP = 1.6 * ATR (R:R = 1:2)
+SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "1.8"))  # Надежный SL = 1.8 * ATR (защита от случайных шпилек)
+TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "2.2"))  # Сбалансированный Take Profit = 2.2 * ATR (R:R > 1:1.2)
 
 # Фильтр времени: Азиатская сессия отключена по умолчанию,
 # так как пользователь управляет ботом вручную кнопками Старт/Пауза
