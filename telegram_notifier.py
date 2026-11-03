@@ -24,7 +24,8 @@ from database import (
     get_recent_analyses,
     get_winrate_stats,
     set_bot_paused,
-    is_bot_paused
+    is_bot_paused,
+    request_retrain
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,8 @@ def get_main_keyboard(is_paused: bool = False) -> Dict:
     return {
         "keyboard": [
             [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
-            [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}]
+            [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
+            [{"text": "🔄 Переобучить модель"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
@@ -529,6 +531,17 @@ class TelegramNotifier:
             count = close_all_open_signals("MANUAL_RESET")
             reply = f"🧹 <b>Сброс выполнен!</b>\nЗакрыто зависших позиций: <b>{count}</b>.\nБот полностью свободен и готов отправлять новые сигналы."
             self.send_raw_message(reply, reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 6. Кнопка "🔄 Переобучить модель" / /retrain
+        elif "переобуч" in lower_text or lower_text in ("/retrain", "retrain"):
+            request_retrain()
+            msg_text = (
+                "🔄 <b>ЗАПРОС НА ПЕРЕОБУЧЕНИЕ ПРИНЯТ!</b>\n\n"
+                "✅ Бот выкачивает свежие данные по всем 6 активам.\n"
+                "✅ Модель пересчитает математические веса индикаторов.\n"
+                "📊 Отчет с обновленной точностью придет в течение 30 секунд!"
+            )
+            self.send_raw_message(msg_text, reply_markup=get_main_keyboard(is_bot_paused()))
 
         else:
             # Неизвестная команда — просто возвращаем кнопки меню

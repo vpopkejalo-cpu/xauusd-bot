@@ -274,6 +274,27 @@ def is_bot_paused() -> bool:
         return False
 
 
+def request_retrain():
+    """Устанавливает флаг запроса на внеочередное переобучение модели."""
+    sql = _adapt_sql("""
+        INSERT INTO bot_settings (key, value) VALUES ('request_retrain', 'true')
+        ON CONFLICT (key) DO UPDATE SET value = 'true'
+    """)
+    with get_db() as cursor:
+        cursor.execute(sql)
+
+
+def consume_retrain_request() -> bool:
+    """Проверяет и сбрасывает флаг запроса переобучения."""
+    with get_db() as cursor:
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'request_retrain'")
+        row = cursor.fetchone()
+        if row and row["value"].lower() == "true":
+            cursor.execute("UPDATE bot_settings SET value = 'false' WHERE key = 'request_retrain'")
+            return True
+        return False
+
+
 def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
     """Рассчитывает статистику винрейта и точности рекомендаций за период (в днях)."""
     from datetime import timedelta

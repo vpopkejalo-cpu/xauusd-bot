@@ -36,7 +36,8 @@ from database import (
     get_open_signals,
     update_signal_status,
     log_candle_analysis,
-    is_bot_paused
+    is_bot_paused,
+    consume_retrain_request
 )
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
@@ -216,9 +217,8 @@ def main():
         except Exception as e:
             logger.error(f"Ошибка начальной загрузки {sym}: {e}")
 
-    # Обучаем модель, если она еще не обучена или была обучена на старом маленьком датасете (< 500 образцов)
-    should_train = not ml_model.is_trained or getattr(ml_model, "samples_count", 0) < 500
-    if all_training_dfs and should_train:
+    # Обучаем модель на свежих исторических данных при каждом запуске
+    if all_training_dfs:
         try:
             import pandas as pd
             merged_df = pd.concat(all_training_dfs, axis=0)
@@ -392,15 +392,28 @@ def main():
                 except Exception as e:
                     logger.error(f"Ошибка при обработке {sym}: {e}", exc_info=False)
 
-            # Проверка необходимости периодического самообучения (раз в сутки)
+            # Проверка необходимости периодического самообучения (каждые 4 часа или по кнопке в Telegram)
             elapsed_hours = (time.time() - last_retrain_time) / 3600.0
-            if elapsed_hours >= RETRAIN_INTERVAL_HOURS:
-                logger.info(f"Прошло {elapsed_hours:.1f} ч. Плановое самообучение модели на свежих данных...")
-                all_candles = load_candles_from_db(limit=5000)
-                if len(all_candles) >= 100:
-                    ind_all = calculate_indicators(all_candles, atr_period=ATR_PERIOD)
-                    if ml_model.train(ind_all):
-                        notifier.send_retrain_notification(len(ind_all), ml_model.last_accuracy)
+            manual_request = consume_retrain_request()
+            if manual_request or elapsed_hours >= RETRAIN_INTERVAL_HOURS:
+                trigger_reason = "по вашему запросу из Telegram" if manual_request else f"плановое (каждые {RETRAIN_INTERVAL_HOURS} ч)"
+                logger.info(f"Запуск самообучения модели ({trigger_reason})...")
+
+                fresh_dfs = []
+                for s in SYMBOLS:
+                    try:
+                        c_df = fetcher.fetch_time_series(symbol=s, outputsize=TRAINING_CANDLES_COUNT)
+                        if not c_df.empty:
+                            save_candles(c_df, symbol=s)
+                            fresh_dfs.append(calculate_indicators(c_df, atr_period=ATR_PERIOD))
+                    except Exception as ex:
+                        logger.warning(f"Ошибка загрузки истории для {s}: {ex}")
+
+                if fresh_dfs:
+                    import pandas as pd
+                    merged_fresh = pd.concat(fresh_dfs, axis=0)
+                    if ml_model.train(merged_fresh):
+                        notifier.send_retrain_notification(len(merged_fresh), ml_model.last_accuracy)
                         last_retrain_time = time.time()
 
         except Exception as e:
