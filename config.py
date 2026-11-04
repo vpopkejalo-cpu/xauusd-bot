@@ -84,6 +84,15 @@ NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "true").lower() in ("true
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DATABASE_PATH = BASE_DIR / "trading_bot.db"
 MODEL_PATH = BASE_DIR / "ml_model.joblib"
+MODELS_DIR = BASE_DIR / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Защитный риск-менеджмент: Аварийный Kill Switch и дневные лимиты
+KILL_SWITCH_ENABLED = os.getenv("KILL_SWITCH_ENABLED", "true").lower() in ("true", "1", "yes")
+KILL_SWITCH_MAX_CONSECUTIVE_LOSSES = int(os.getenv("KILL_SWITCH_MAX_CONSECUTIVE_LOSSES", "3"))
+KILL_SWITCH_MAX_DAILY_SIGNALS = int(os.getenv("KILL_SWITCH_MAX_DAILY_SIGNALS", "12"))
+KILL_SWITCH_MAX_DAILY_LOSS = float(os.getenv("KILL_SWITCH_MAX_DAILY_LOSS", "35.0"))
+
 
 
 def validate_config() -> list[str]:

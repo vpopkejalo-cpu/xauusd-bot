@@ -15,7 +15,14 @@ import threading
 import requests
 import logging
 from typing import Optional, Dict, Any, List
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SYMBOL, SYMBOLS, SYMBOL_NAMES
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    SYMBOL,
+    SYMBOLS,
+    SYMBOL_NAMES,
+    KILL_SWITCH_MAX_DAILY_SIGNALS
+)
 from database import (
     close_all_open_signals,
     update_signal_status,
@@ -23,6 +30,9 @@ from database import (
     get_open_signals,
     get_recent_analyses,
     get_winrate_stats,
+    get_today_signal_stats,
+    is_kill_switch_active,
+    reset_kill_switch,
     set_bot_paused,
     is_bot_paused,
     request_retrain,
@@ -219,7 +229,9 @@ class TelegramNotifier:
         session_name: str,
         recommended_lot: float = 0.01,
         news_sentiment: str = "",
-        headline: str = ""
+        headline: str = "",
+        adx: Optional[float] = None,
+        asset_category: str = ""
     ) -> Optional[int]:
         """
         Форматирует и отправляет готовый торговый сигнал с кнопками управления:
@@ -246,23 +258,27 @@ class TelegramNotifier:
             clean_head = headline[:90] + ("..." if len(headline) > 90 else "")
             news_block += f"🗞 <b>Свежая новость:</b> <i>«{clean_head}»</i>\n"
 
+        adx_block = f"📊 <b>Сила тренда (ADX 14):</b> <code>{adx:.1f}</code>\n" if adx is not None else ""
+        category_badge = f" ({asset_category})" if asset_category else ""
+
         message = (
             f"🔔 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ: #{signal_id}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🏷 <b>Инструмент:</b> <b>{display_name}</b>\n"
+            f"🏷 <b>Инструмент:</b> <b>{display_name}</b>{category_badge}\n"
             f"{color_badge} {dir_emoji}\n\n"
             f"🎯 <b>Направление:</b> {dir_name}\n"
             f"💵 <b>Цена входа:</b> <code>{entry_price}</code>\n"
-            f"🛑 <b>Stop Loss:</b> <code>{stop_loss}</code> (защита от рыночного шума)\n"
+            f"🛑 <b>Stop Loss:</b> <code>{stop_loss}</code> (защита от шума)\n"
             f"🏆 <b>Take Profit:</b> <code>{take_profit}</code>\n"
             f"⚖️ <b>Соотношение R:R:</b> <code>{risk_reward}</code>\n\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 <b>Уверенность алгоритма:</b> <b>{calibrated_prob:.1%}</b>\n"
+            f"🤖 <b>Уверенность модели:</b> <b>{calibrated_prob:.1%}</b>\n"
+            f"{adx_block}"
             f"{news_block}"
             f"🌊 <b>Волатильность (ATR 14):</b> <code>${atr}</code>\n"
             f"🌍 <b>Сессия:</b> {session_name}\n\n"
             f"💼 <b>Рекомендуемый объем лота (для риска $10):</b> <b>{recommended_lot}</b>\n"
-            f"💡 <i>На Trading 212 открывайте микро-лот (0.01–0.02), чтобы контролировать риск!</i>\n\n"
+            f"💡 <i>На Trading 212 контролируйте размер позиции!</i>\n\n"
             f"👇 <b>Вы вошли в эту сделку? Нажмите кнопку:</b>"
         )
 
@@ -282,6 +298,33 @@ class TelegramNotifier:
             except Exception as e:
                 logger.warning(f"Не удалось связать message_id с сигналом #{signal_id}: {e}")
         return msg_id
+
+    def send_kill_switch_alert(self, reason: str, stats: Dict[str, Any]) -> Optional[int]:
+        """Отправляет экстренное оповещение о срабатывании аварийного Kill Switch."""
+        consecutive = stats.get("consecutive_losses", 0)
+        total = stats.get("total_signals", 0)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        pnl = stats.get("net_pnl", 0.0)
+
+        msg = (
+            "🛑 <b>АВАРИЙНЫЙ ТОРГОВЫЙ KILL SWITCH АКТИВИРОВАН!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Причина:</b> {reason}\n\n"
+            f"📊 <b>Статистика дня на момент остановки:</b>\n"
+            f"• Сигналов выдано: <b>{total}</b>\n"
+            f"• Результаты: <b>{wins} TP</b> / <b>{losses} SL</b>\n"
+            f"• Серия убытков: <b>{consecutive} подряд</b>\n"
+            f"• Дневной результат: <code>{pnl:+.2f} пунктов</code>\n\n"
+            "🛡 <b>Генерация новых сигналов приостановлена до 00:00 UTC</b> для надежной защиты депозита от неблагоприятного рынка и распила.\n\n"
+            "<i>Если вы уверены в рынке и хотите принудительно разблокировать бота, нажмите кнопку ниже:</i>"
+        )
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔓 Сбросить Kill Switch (Разблокировать)", "callback_data": "action_reset_ks"}]
+            ]
+        }
+        return self.send_raw_message(msg, reply_markup=markup)
 
     def send_trade_outcome(
         self,
@@ -425,6 +468,13 @@ class TelegramNotifier:
             count = close_all_open_signals("MANUAL_RESET")
             self.answer_callback_query(cb_id, f"Сброшено сделок: {count}", show_alert=True)
             self.send_raw_message(f"🧹 <b>Сброс выполнен!</b> Закрыто зависших позиций: <b>{count}</b>. Бот свободен.")
+            return
+
+        # 2.1 Сброс аварийного Kill Switch
+        if cb_data == "action_reset_ks":
+            reset_kill_switch()
+            self.answer_callback_query(cb_id, "Kill Switch сброшен!", show_alert=True)
+            self.send_raw_message("🔓 <b>Аварийный Kill Switch сброшен вручную!</b>\nСканирование рынка и генерация сигналов разблокированы.")
             return
 
         # 3. Быстрый переход прямо к карточке сделки
@@ -624,6 +674,15 @@ class TelegramNotifier:
                         {"text": f"🎯 #{s['id']} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
 
+            # Статус Kill Switch и лимиты
+            ks_active, ks_reason = is_kill_switch_active()
+            today_stats = get_today_signal_stats()
+            if ks_active:
+                ks_block = f"🛑 <b>KILL SWITCH:</b> <b>АКТИВИРОВАН</b>\n<i>Причина: {ks_reason}</i>\n"
+                inline_buttons.append([{"text": "🔓 Разблокировать Kill Switch", "callback_data": "action_reset_ks"}])
+            else:
+                ks_block = f"🛡 <b>Защита риска:</b> В норме (Сигналов сегодня: <b>{today_stats['total_signals']} / {KILL_SWITCH_MAX_DAILY_SIGNALS}</b>, Серия убытков: <b>{today_stats['consecutive_losses']}</b>)\n"
+
             inline_buttons.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
             inline_reset = {"inline_keyboard": inline_buttons}
 
@@ -644,7 +703,8 @@ class TelegramNotifier:
 
             reply = (
                 "📊 <b>ТЕКУЩИЙ СТАТУС БОТА:</b>\n"
-                f"Состояние: <b>{status_badge}</b>\n\n"
+                f"Состояние: <b>{status_badge}</b>\n"
+                f"{ks_block}\n"
                 "💰 <b>Котировки активов (Trading 212):</b>\n"
                 f"{prices_block}\n\n"
                 "📋 <b>Активные сделки в боте:</b>\n"
@@ -756,6 +816,12 @@ class TelegramNotifier:
                 "📊 Отчет с обновленной точностью придет в течение 30 секунд!"
             )
             self.send_raw_message(msg_text, reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 7. Сброс Kill Switch вручную / /reset_ks
+        elif "kill" in lower_text or "килл" in lower_text or "разблок" in lower_text or lower_text in ("/reset_ks", "reset_ks"):
+            reset_kill_switch()
+            reply = "🔓 <b>Аварийный Kill Switch сброшен вручную!</b>\nСканирование рынка и генерация сигналов разблокированы."
+            self.send_raw_message(reply, reply_markup=get_main_keyboard(is_bot_paused()))
 
         else:
             # Неизвестная команда — просто возвращаем кнопки меню

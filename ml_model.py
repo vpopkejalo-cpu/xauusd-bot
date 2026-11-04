@@ -1,37 +1,46 @@
 """
-Модуль машинного обучения (Machine Learning) для предсказания направления рынков.
-Использует scikit-learn (логистическую регрессию с масштабированием признаков StandardScaler).
-Обеспечивает:
-1. Бинарное направленное прогнозирование (BUY: импульс вверх / SELL: импульс вниз).
-2. Вычисление вероятности успешности сделки (P >= 60% для генерации сигнала, 40-60% - нейтральная зона HOLD).
-3. Автоматическое периодическое самообучение на обновленных исторических данных.
-4. Сохранение и загрузку обученной модели через joblib.
+Модуль машинного обучения (Machine Learning) с индивидуальными моделями под каждый актив.
+Использует scikit-learn (Pipeline: StandardScaler + LogisticRegression с регуляризацией).
+
+Ключевые преимущества:
+1. Изолированные модели: каждый из 6 инструментов обучается исключительно на своей истории.
+2. Честная разметка датасета по методу Triple Barrier (First-touch):
+   Учитывает очередность касания TP и SL. Если цена сначала коснулась SL, а потом развернулась —
+   сделка считается убыточной, исключая ложное обучение (Path-dependent validation).
+3. Индивидуальные пороги вероятности (P >= 62%–70% в зависимости от волатильности инструмента).
 """
 
 import os
+import re
 import logging
 import joblib
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Dict, Any
+from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
 
-from config import MODEL_PATH, MIN_PROBABILITY, SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER
+from config import MODEL_PATH, MODELS_DIR, MIN_PROBABILITY
+from risk_manager import get_asset_profile
 from database import log_training_run
 
 logger = logging.getLogger(__name__)
 
-# Список признаков (features) для обучения модели
+# Расширенный список признаков (features) для обучения моделей
 FEATURE_COLUMNS = [
     "rsi",
     "dist_ema_21",
     "dist_ema_50",
+    "dist_ema_200",
     "ema_trend",
     "atr_pct",
+    "adx",
+    "plus_di",
+    "minus_di",
     "macd",
     "macd_hist",
     "return_1",
@@ -44,60 +53,139 @@ CLASS_SELL = 0
 CLASS_BUY = 1
 
 
+def clean_symbol_for_filename(symbol: str) -> str:
+    """Преобразует тикер в безопасное имя файла (например, 'XAU/USD' -> 'XAU_USD')."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", symbol.strip())
+
+
 class TradingMLModel:
-    def __init__(self, model_path=MODEL_PATH, min_prob: float = MIN_PROBABILITY):
-        self.model_path = model_path
-        self.min_prob = min_prob
+    def __init__(self, models_dir: Path = MODELS_DIR, default_min_prob: float = MIN_PROBABILITY):
+        self.models_dir = Path(models_dir)
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.default_min_prob = default_min_prob
+
+        # Словари индивидуальных моделей по символам: symbol -> Pipeline
+        self.models: Dict[str, Pipeline] = {}
+        self.accuracies: Dict[str, float] = {}
+        self.samples_counts: Dict[str, int] = {}
+
+        # Общие атрибуты для обратной совместимости
         self.pipeline: Optional[Pipeline] = None
         self.is_trained = False
         self.samples_count = 0
         self.last_accuracy = 0.0
 
-        # Попытка загрузить сохраненную ранее модель
-        self.load_model()
+        # Загружаем все сохраненные модели с диска
+        self.load_all_models()
 
-    def load_model(self) -> bool:
-        """Загружает сохраненную модель с диска, если файл существует."""
-        if os.path.exists(self.model_path):
+    def get_model_path(self, symbol: str) -> Path:
+        """Возвращает путь к файлу модели конкретного актива."""
+        safe_sym = clean_symbol_for_filename(symbol)
+        return self.models_dir / f"model_{safe_sym}.joblib"
+
+    def load_all_models(self) -> int:
+        """Загружает все доступные модели из директории models/."""
+        loaded_count = 0
+        if not self.models_dir.exists():
+            return 0
+
+        for file_path in self.models_dir.glob("model_*.joblib"):
             try:
-                data = joblib.load(self.model_path)
+                data = joblib.load(file_path)
+                sym = data.get("symbol", "")
+                pipe = data.get("pipeline")
+                acc = float(data.get("accuracy", 0.0))
+                cnt = int(data.get("samples_count", 0))
+
+                if sym and pipe:
+                    self.models[sym] = pipe
+                    self.accuracies[sym] = acc
+                    self.samples_counts[sym] = cnt
+                    loaded_count += 1
+                    logger.info(f"Загружена модель для {sym}: точность CV {acc:.1%}, образцов {cnt}")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить модель {file_path}: {e}")
+
+        # Для совместимости: если есть модель для XAU/USD, делаем ее дефолтной
+        if "XAU/USD" in self.models:
+            self.pipeline = self.models["XAU/USD"]
+            self.is_trained = True
+            self.last_accuracy = self.accuracies.get("XAU/USD", 0.0)
+            self.samples_count = self.samples_counts.get("XAU/USD", 0)
+        elif self.models:
+            # Берем первую доступную
+            first_sym = next(iter(self.models))
+            self.pipeline = self.models[first_sym]
+            self.is_trained = True
+            self.last_accuracy = self.accuracies.get(first_sym, 0.0)
+            self.samples_count = self.samples_counts.get(first_sym, 0)
+        elif os.path.exists(MODEL_PATH):
+            # Резервная загрузка старого монолитного файла, если есть
+            try:
+                data = joblib.load(MODEL_PATH)
                 self.pipeline = data.get("pipeline")
+                self.is_trained = True
                 self.last_accuracy = float(data.get("accuracy", 0.0))
                 self.samples_count = int(data.get("samples_count", 0))
-                self.is_trained = True
-                logger.info(f"ML модель успешно загружена из {self.model_path}. Образцов: {self.samples_count}, Точность: {self.last_accuracy:.2%}")
-                return True
-            except Exception as e:
-                logger.error(f"Не удалось загрузить модель из {self.model_path}: {e}")
-                self.is_trained = False
-        return False
+            except Exception:
+                pass
 
-    def save_model(self, accuracy: float = 0.0, samples_count: int = 0):
-        """Сохраняет обученную модель на диск."""
+        return loaded_count
+
+    def save_symbol_model(self, symbol: str, pipeline: Pipeline, accuracy: float, samples_count: int):
+        """Сохраняет обученную модель конкретного актива на диск."""
         try:
+            path = self.get_model_path(symbol)
             data = {
-                "pipeline": self.pipeline,
+                "symbol": symbol,
+                "pipeline": pipeline,
                 "accuracy": float(accuracy),
                 "samples_count": int(samples_count),
                 "features": FEATURE_COLUMNS
             }
-            joblib.dump(data, self.model_path)
-            self.samples_count = samples_count
-            self.last_accuracy = accuracy
-            logger.info(f"ML модель успешно сохранена в {self.model_path} ({samples_count} образцов)")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения модели: {e}")
+            joblib.dump(data, path)
 
-    def prepare_dataset(self, df: pd.DataFrame, horizon: int = 12) -> Tuple[pd.DataFrame, pd.Series]:
+            # Сохраняем также в память
+            self.models[symbol] = pipeline
+            self.accuracies[symbol] = accuracy
+            self.samples_counts[symbol] = samples_count
+
+            # Если это основной актив, обновляем дефолт
+            if symbol == "XAU/USD" or not self.is_trained:
+                self.pipeline = pipeline
+                self.is_trained = True
+                self.last_accuracy = accuracy
+                self.samples_count = samples_count
+                joblib.dump(data, MODEL_PATH)
+
+            logger.info(f"Модель для {symbol} сохранена в {path} ({samples_count} образцов, точность {accuracy:.1%})")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения модели для {symbol}: {e}")
+
+    def prepare_dataset(
+        self,
+        df: pd.DataFrame,
+        symbol: str = "XAU/USD",
+        horizon: int = 15
+    ) -> Tuple[pd.DataFrame, pd.Series]:
         """
-        Формирует матрицу признаков X и бинарные метки направления y.
-        Каждая свеча размечается по преобладающему движению цены (рост или падение) на горизонте horizon свечей.
+        Формирует матрицу признаков X и метки y по методу Triple Barrier (First-touch):
+        Для каждой свечи i проверяет реальную траекторию цены на горизонте horizon свечей:
+        - Если при сценарии BUY цена коснулась уровня TP раньше, чем уровня SL -> победа BUY.
+        - Если при сценарии SELL цена коснулась уровня TP раньше, чем уровня SL -> победа SELL.
+        - Если оба сценария выбило по стопу или рынок застрял во флэте -> шум отсекается.
         """
         data = df.copy()
 
         missing_cols = [c for c in FEATURE_COLUMNS if c not in data.columns]
         if missing_cols:
-            raise ValueError(f"В DataFrame отсутствуют необходимые колонки: {missing_cols}")
+            raise ValueError(f"В DataFrame отсутствуют колонки: {missing_cols}")
+
+        profile = get_asset_profile(symbol)
+        sl_mult = profile["sl_atr_mult"]
+        tp_mult = profile["tp_atr_mult"]
+        min_sl = profile["min_sl_dist"]
+        min_tp = profile["min_tp_dist"]
 
         n = len(data)
         closes = data["close"].values
@@ -112,31 +200,77 @@ class TradingMLModel:
             entry = closes[i]
             atr = atrs[i]
 
-            if np.isnan(atr) or atr <= 0:
+            if np.isnan(atr) or atr <= 0 or np.isnan(entry):
                 continue
 
-            future_highs = highs[i + 1 : i + 1 + horizon]
-            future_lows = lows[i + 1 : i + 1 + horizon]
-            future_closes = closes[i + 1 : i + 1 + horizon]
+            sl_dist = max(atr * sl_mult, min_sl)
+            tp_dist = max(atr * tp_mult, min_tp)
 
-            max_up = float(future_highs.max() - entry)
-            max_down = float(entry - future_lows.min())
-            net_change = float(future_closes[-1] - entry)
+            buy_tp = entry + tp_dist
+            buy_sl = entry - sl_dist
 
-            # Определяем доминирующее направление ценового импульса
-            if max_up > max_down:
+            sell_tp = entry - tp_dist
+            sell_sl = entry + sl_dist
+
+            buy_outcome = None   # "WIN", "LOSS", None
+            sell_outcome = None  # "WIN", "LOSS", None
+
+            # Пошаговая проверка движения цены (Path-dependent Triple Barrier)
+            for step in range(1, horizon + 1):
+                idx = i + step
+                h = highs[idx]
+                l = lows[idx]
+
+                # Проверка сценария BUY
+                if buy_outcome is None:
+                    hit_sl = (l <= buy_sl)
+                    hit_tp = (h >= buy_tp)
+                    if hit_sl and hit_tp:
+                        buy_outcome = "LOSS"  # Консервативно: считаем, что выбило стоп
+                    elif hit_sl:
+                        buy_outcome = "LOSS"
+                    elif hit_tp:
+                        buy_outcome = "WIN"
+
+                # Проверка сценария SELL
+                if sell_outcome is None:
+                    hit_sl = (h >= sell_sl)
+                    hit_tp = (l <= sell_tp)
+                    if hit_sl and hit_tp:
+                        sell_outcome = "LOSS"
+                    elif hit_sl:
+                        sell_outcome = "LOSS"
+                    elif hit_tp:
+                        sell_outcome = "WIN"
+
+                if buy_outcome is not None and sell_outcome is not None:
+                    break
+
+            # Принятие решения по метке
+            if buy_outcome == "WIN" and sell_outcome != "WIN":
                 labels.append(CLASS_BUY)
-            elif max_down > max_up:
+                valid_indices.append(i)
+            elif sell_outcome == "WIN" and buy_outcome != "WIN":
                 labels.append(CLASS_SELL)
+                valid_indices.append(i)
             else:
-                labels.append(CLASS_BUY if net_change >= 0 else CLASS_SELL)
+                # Если ни один уровень не взят чисто, проверяем выраженность смещения
+                # без касания стопов
+                net_change = closes[i + horizon] - entry
+                if buy_outcome != "LOSS" and net_change > 0.4 * tp_dist:
+                    labels.append(CLASS_BUY)
+                    valid_indices.append(i)
+                elif sell_outcome != "LOSS" and net_change < -0.4 * tp_dist:
+                    labels.append(CLASS_SELL)
+                    valid_indices.append(i)
+                # Иначе пропускаем свечу: не учим модель на распиле и двойных стопах
 
-            valid_indices.append(i)
+        if not valid_indices:
+            return pd.DataFrame(), pd.Series(dtype=int)
 
         clean_data = data.iloc[valid_indices].copy()
         clean_data["target"] = labels
 
-        # Удаляем строки с NaN в признаках
         valid_mask = ~clean_data[FEATURE_COLUMNS].isna().any(axis=1)
         final_data = clean_data[valid_mask]
 
@@ -144,36 +278,35 @@ class TradingMLModel:
         y = final_data["target"]
         return X, y
 
-    def train(self, df: pd.DataFrame) -> bool:
+    def train(self, df: pd.DataFrame, symbol: str = "XAU/USD") -> bool:
         """
-        Обучает модель логистической регрессии с масштабированием признаков (StandardScaler).
-        Оценивает точность по временной кросс-валидации (TimeSeriesSplit).
-        Базовый случайный уровень = 50.0%. Точность выше 52-55% дает сильный мат. перевес.
+        Обучает модель для конкретного актива с использованием временной кросс-валидации.
         """
         try:
-            X, y = self.prepare_dataset(df)
-            if len(X) < 40:
-                logger.warning(f"Недостаточно размеченных данных для обучения ({len(X)} образцов). Обучение отложено.")
+            X, y = self.prepare_dataset(df, symbol=symbol)
+            if len(X) < 35:
+                logger.warning(f"[{symbol}] Недостаточно размеченных сделок ({len(X)} образцов). Требуется минимум 35.")
                 return False
 
             unique_classes = np.unique(y)
             if len(unique_classes) < 2:
-                logger.warning(f"В выборке представлен только один класс: {unique_classes}. Обучение отложено.")
+                logger.warning(f"[{symbol}] В выборке представлен только один класс ({unique_classes}). Обучение отложено.")
                 return False
 
-            # Создаем Pipeline: масштабирование + сбалансированная логистическая регрессия
+            # Создаем Pipeline со стандартизацией и регуляризованной логистической регрессией
             pipeline = Pipeline([
                 ("scaler", StandardScaler()),
                 ("classifier", LogisticRegression(
                     class_weight="balanced",
                     max_iter=1000,
-                    C=1.0,
+                    C=0.8,              # Регуляризация для защиты от переобучения
                     random_state=42
                 ))
             ])
 
-            # Оценка качества на out-of-sample данных (временная кросс-валидация)
-            tscv = TimeSeriesSplit(n_splits=5)
+            # Оценка на временной кросс-валидации (TimeSeriesSplit)
+            n_splits = min(5, max(2, len(X) // 20))
+            tscv = TimeSeriesSplit(n_splits=n_splits)
             accuracies = []
             for train_idx, test_idx in tscv.split(X):
                 X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
@@ -186,84 +319,94 @@ class TradingMLModel:
 
             mean_acc = float(np.mean(accuracies)) if accuracies else 0.50
 
-            # Обучаем финальную модель на всем массиве данных
+            # Обучаем финальную модель актива на всем массиве
             pipeline.fit(X, y)
-            self.pipeline = pipeline
-            self.is_trained = True
-            self.last_accuracy = mean_acc
 
-            # Сохраняем модель на диск и в базу данных
-            self.save_model(accuracy=mean_acc, samples_count=len(X))
-            log_training_run(samples_count=len(X), accuracy=mean_acc, notes="Автоматическое переобучение")
+            # Сохраняем модель
+            self.save_symbol_model(symbol, pipeline, mean_acc, len(X))
+            log_training_run(samples_count=len(X), accuracy=mean_acc, notes=f"Индивидуальная модель {symbol}")
 
-            logger.info(f"Обучение завершено успешно. Образцов: {len(X)}, Точность CV: {mean_acc:.2%}")
+            logger.info(f"[{symbol}] Обучение успешно завершено. Образцов: {len(X)}, Точность CV: {mean_acc:.1%}")
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка при обучении ML модели: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Ошибка при обучении ML модели: {e}", exc_info=True)
             return False
 
-    def predict(self, current_candle_features: pd.Series) -> Dict[str, Any]:
+    def predict(
+        self,
+        symbol_or_candle,
+        current_candle_features: Optional[pd.Series] = None
+    ) -> Dict[str, Any]:
         """
-        Принимает вектор признаков текущей свечи.
-        Возвращает словарь:
-        {
-            "action": "BUY" | "SELL" | "HOLD",
-            "probability": float (0.0 .. 1.0),
-            "reason": str
-        }
+        Прогнозирует направление для конкретного актива.
+        Поддерживает оба вызова:
+        - predict(symbol, candle)
+        - predict(candle) — обратная совместимость
         """
-        if not self.is_trained or self.pipeline is None:
+        if current_candle_features is None:
+            # Вызов predict(candle)
+            candle = symbol_or_candle
+            symbol = "XAU/USD"
+        else:
+            # Вызов predict(symbol, candle)
+            symbol = str(symbol_or_candle)
+            candle = current_candle_features
+
+        profile = get_asset_profile(symbol)
+        min_prob = profile.get("min_probability", self.default_min_prob)
+
+        pipeline = self.models.get(symbol, self.pipeline)
+        if pipeline is None:
             return {
                 "action": "HOLD",
                 "probability": 0.0,
-                "reason": "Модель еще не обучена (недостаточно истории)"
+                "reason": f"[{symbol}] Индивидуальная модель еще не обучена"
             }
 
         try:
-            features_df = pd.DataFrame([current_candle_features[FEATURE_COLUMNS]])
+            features_df = pd.DataFrame([candle[FEATURE_COLUMNS]])
             if features_df.isna().any().any():
                 return {
                     "action": "HOLD",
                     "probability": 0.0,
-                    "reason": "В векторе признаков присутствуют NaN (период прогрева)"
+                    "reason": f"[{symbol}] В векторе признаков есть NaN (период прогрева)"
                 }
 
-            # Извлекаем вероятность классов [0: SELL, 1: BUY]
-            classes = list(self.pipeline.classes_)
-            probabilities = self.pipeline.predict_proba(features_df)[0]
+            classes = list(pipeline.classes_)
+            probabilities = pipeline.predict_proba(features_df)[0]
             prob_map = dict(zip(classes, probabilities))
 
             buy_prob = float(prob_map.get(CLASS_BUY, 0.5))
             sell_prob = float(prob_map.get(CLASS_SELL, 0.5))
 
-            logger.debug(f"ML Прогноз направления: BUY={buy_prob:.2%}, SELL={sell_prob:.2%}, Порог={self.min_prob:.2%}")
+            logger.debug(f"[{symbol}] ML Прогноз: BUY={buy_prob:.1%}, SELL={sell_prob:.1%}, Порог={min_prob:.1%}")
 
-            # 1. Сигнал на покупку BUY при уверенности >= min_prob (60%)
-            if buy_prob >= self.min_prob:
+            # 1. Покупка BUY при превышении индивидуального порога актива
+            if buy_prob >= min_prob:
                 return {
                     "action": "BUY",
                     "probability": buy_prob,
-                    "reason": f"Вероятность роста {buy_prob:.1%} превышает защитный порог {self.min_prob:.1%}"
+                    "reason": f"Вероятность роста {buy_prob:.1%} >= порога {min_prob:.1%}"
                 }
-            # 2. Сигнал на продажу SELL при уверенности >= min_prob (60%)
-            elif sell_prob >= self.min_prob:
+            # 2. Продажа SELL при превышении индивидуального порога актива
+            elif sell_prob >= min_prob:
                 return {
                     "action": "SELL",
                     "probability": sell_prob,
-                    "reason": f"Вероятность падения {sell_prob:.1%} превышает защитный порог {self.min_prob:.1%}"
+                    "reason": f"Вероятность падения {sell_prob:.1%} >= порога {min_prob:.1%}"
                 }
-            # 3. Нейтральная зона (40% - 60%) — рынок не дает четкого преимущества
+            # 3. Нейтральная зона
             else:
                 max_prob = float(max(buy_prob, sell_prob))
                 return {
                     "action": "HOLD",
                     "probability": max_prob,
-                    "reason": f"Уверенность ({max_prob:.1%}) в нейтральной зоне (40-60%) — рынок без четкого тренда"
+                    "reason": f"Уверенность {max_prob:.1%} ниже порога {min_prob:.1%} — нет устойчивого преимущества"
                 }
 
         except Exception as e:
-            logger.error(f"Ошибка при вычислении прогноза модели: {e}")
+            logger.error(f"[{symbol}] Ошибка при прогнозировании: {e}")
             return {
                 "action": "HOLD",
                 "probability": 0.0,

@@ -10,7 +10,7 @@ import os
 import sqlite3
 import pandas as pd
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from contextlib import contextmanager
 import logging
 from config import DATABASE_PATH, DATABASE_URL
@@ -529,3 +529,117 @@ def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
             float(accuracy),
             str(notes)
         ))
+
+
+def get_today_signal_stats() -> Dict[str, Any]:
+    """
+    Рассчитывает статистику сигналов за текущие календарные сутки UTC.
+    Возвращает словарь с количеством, винрейтом, серией убытков и распределением по активам.
+    """
+    today_start = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
+    sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
+    with get_db() as cursor:
+        cursor.execute(sql, (today_start,))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    total_today = len(rows)
+    wins = sum(1 for r in rows if r["status"] == "TP_HIT")
+    losses = sum(1 for r in rows if r["status"] == "SL_HIT")
+    manual = sum(1 for r in rows if r["status"] == "MANUAL_CLOSE")
+    skipped = sum(1 for r in rows if r["status"] == "SKIPPED")
+    open_count = sum(1 for r in rows if r["status"] == "OPEN")
+
+    finished = wins + losses
+    winrate = round((wins / finished * 100), 1) if finished > 0 else 0.0
+    net_pnl = sum((r["pnl"] or 0.0) for r in rows if r["status"] in ("TP_HIT", "SL_HIT"))
+
+    # Расчет текущей серии убытков подряд (consecutive losses)
+    finished_rows = [r for r in rows if r["status"] in ("TP_HIT", "SL_HIT")]
+    consecutive_losses = 0
+    for r in reversed(finished_rows):
+        if r["status"] == "SL_HIT":
+            consecutive_losses += 1
+        else:
+            break
+
+    # Распределение по активам
+    by_symbol: Dict[str, int] = {}
+    for r in rows:
+        sym = r.get("symbol", "UNKNOWN")
+        by_symbol[sym] = by_symbol.get(sym, 0) + 1
+
+    return {
+        "today_date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "total_signals": total_today,
+        "wins": wins,
+        "losses": losses,
+        "manual": manual,
+        "skipped": skipped,
+        "open_count": open_count,
+        "finished": finished,
+        "winrate": winrate,
+        "net_pnl": round(net_pnl, 2),
+        "consecutive_losses": consecutive_losses,
+        "by_symbol": by_symbol
+    }
+
+
+def get_today_symbol_signal_count(symbol: str) -> int:
+    """Возвращает количество сигналов, выданных по конкретному активу за сегодня (UTC)."""
+    today_start = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
+    sql = _adapt_sql("SELECT count(*) as cnt FROM signals WHERE symbol = ? AND created_at >= ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (str(symbol), today_start))
+        row = cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+
+def is_kill_switch_active() -> Tuple[bool, str]:
+    """
+    Проверяет, активен ли аварийный Kill Switch на сегодня.
+    Автоматически сбрасывается при наступлении новых суток UTC.
+    """
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    with get_db() as cursor:
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'kill_switch_active'")
+        active_row = cursor.fetchone()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'kill_switch_date'")
+        date_row = cursor.fetchone()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'kill_switch_reason'")
+        reason_row = cursor.fetchone()
+
+        if active_row and active_row["value"].lower() == "true":
+            # Проверяем дату: если дата старая, Kill Switch автоматически деактивируется на новый день
+            if date_row and date_row["value"] == today_str:
+                reason = reason_row["value"] if reason_row else "Активирован аварийный лимит риска"
+                return True, reason
+            else:
+                # Новые сутки — автоматический сброс
+                reset_kill_switch()
+                return False, ""
+    return False, ""
+
+
+def trigger_kill_switch(reason: str):
+    """Активирует аварийный Kill Switch на текущие сутки UTC."""
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    with get_db() as cursor:
+        for k, v in [("kill_switch_active", "true"), ("kill_switch_date", today_str), ("kill_switch_reason", str(reason))]:
+            sql = _adapt_sql("""
+                INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """)
+            cursor.execute(sql, (k, v))
+    logger.warning(f"🛑 KILL SWITCH АКТИВИРОВАН: {reason}")
+
+
+def reset_kill_switch():
+    """Сбрасывает флаг аварийного Kill Switch."""
+    with get_db() as cursor:
+        sql = _adapt_sql("""
+            INSERT INTO bot_settings (key, value) VALUES (?, ?)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """)
+        cursor.execute(sql, ("kill_switch_active", "false"))
+    logger.info("🔓 Kill Switch сброшен. Торговля разблокирована.")
+
