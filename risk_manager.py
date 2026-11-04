@@ -21,6 +21,7 @@ from typing import Tuple, Dict, Any, Optional
 import pandas as pd
 
 from config import (
+    DEMO_MODE,
     FILTER_ASIAN_SESSION,
     ASIAN_SESSION_START_HOUR,
     ASIAN_SESSION_END_HOUR,
@@ -252,12 +253,11 @@ def check_asset_trading_allowed(
 
 def evaluate_kill_switch(daily_stats: Dict[str, Any]) -> Tuple[bool, str]:
     """
-    Проверяет дневные показатели на срабатывание аварийного Kill Switch:
-    - 3 или более стоп-лосса подряд.
-    - Достижение дневного потолка по количеству сигналов (защита от овертрейдинга).
-    - Превышение порога чистого дневного убытка.
+    Проверяет дневные показатели на срабатывание аварийного Kill Switch.
+    В DEMO_MODE или при KILL_SWITCH_ENABLED=False торговля никогда не блокируется,
+    чтобы бот непрерывно собирал опыт и дообучался.
     """
-    if not KILL_SWITCH_ENABLED:
+    if not KILL_SWITCH_ENABLED or DEMO_MODE:
         return False, ""
 
     consecutive_losses = daily_stats.get("consecutive_losses", 0)

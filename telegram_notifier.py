@@ -77,7 +77,7 @@ def get_winrate_period_keyboard() -> Dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "📅 1 День", "callback_data": "wr_1"},
+                {"text": "📅 Сегодня", "callback_data": "wr_1"},
                 {"text": "📆 7 Дней", "callback_data": "wr_7"},
                 {"text": "🗓 1 Месяц", "callback_data": "wr_30"}
             ],
@@ -411,7 +411,7 @@ class TelegramNotifier:
         if cb_data.startswith("wr_"):
             period_str = cb_data.replace("wr_", "")
             days_map = {
-                "1": (1, "1 День"),
+                "1": (1, "Сегодня"),
                 "7": (7, "7 Дней"),
                 "30": (30, "1 Месяц"),
                 "90": (90, "3 Месяца"),

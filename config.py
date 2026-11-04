@@ -87,11 +87,15 @@ MODEL_PATH = BASE_DIR / "ml_model.joblib"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Защитный риск-менеджмент: Аварийный Kill Switch и дневные лимиты
-KILL_SWITCH_ENABLED = os.getenv("KILL_SWITCH_ENABLED", "true").lower() in ("true", "1", "yes")
-KILL_SWITCH_MAX_CONSECUTIVE_LOSSES = int(os.getenv("KILL_SWITCH_MAX_CONSECUTIVE_LOSSES", "3"))
-KILL_SWITCH_MAX_DAILY_SIGNALS = int(os.getenv("KILL_SWITCH_MAX_DAILY_SIGNALS", "12"))
-KILL_SWITCH_MAX_DAILY_LOSS = float(os.getenv("KILL_SWITCH_MAX_DAILY_LOSS", "35.0"))
+# Режим работы бота: DEMO_MODE = True гарантирует непрерывную работу, анализ свечей и сбор опыта
+DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")
+
+# Защитный риск-менеджмент:
+# На демо-счете KILL_SWITCH_ENABLED отключен по умолчанию, чтобы не прерывать сбор опыта и дообучение моделей
+KILL_SWITCH_ENABLED = os.getenv("KILL_SWITCH_ENABLED", "false").lower() in ("true", "1", "yes")
+KILL_SWITCH_MAX_CONSECUTIVE_LOSSES = int(os.getenv("KILL_SWITCH_MAX_CONSECUTIVE_LOSSES", "5"))
+KILL_SWITCH_MAX_DAILY_SIGNALS = int(os.getenv("KILL_SWITCH_MAX_DAILY_SIGNALS", "30"))
+KILL_SWITCH_MAX_DAILY_LOSS = float(os.getenv("KILL_SWITCH_MAX_DAILY_LOSS", "50.0"))
 
 
 

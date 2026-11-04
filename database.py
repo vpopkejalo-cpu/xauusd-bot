@@ -309,15 +309,26 @@ def consume_retrain_request() -> bool:
 
 
 def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
-    """Рассчитывает статистику винрейта и точности рекомендаций за период (в днях)."""
+    """
+    Рассчитывает статистику винрейта и точности рекомендаций за период (в днях).
+    period_days == 1: строго за СЕГОДНЯ (календарные сутки с 00:00:00 UTC).
+    period_days > 1: за последние N календарных дней.
+    period_days is None: за всё время.
+    """
     from datetime import timedelta
     with get_db() as cursor:
-        if period_days is not None:
-            since = (datetime.utcnow() - timedelta(days=period_days)).isoformat()
-            sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ?")
+        if period_days == 1:
+            # Календарные сутки "Сегодня" (с 00:00:00 UTC)
+            since = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
+            sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
+            cursor.execute(sql, (since,))
+        elif period_days is not None and period_days > 1:
+            # За последние N календарных дней
+            since = (datetime.utcnow() - timedelta(days=period_days - 1)).strftime("%Y-%m-%d") + "T00:00:00"
+            sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
             cursor.execute(sql, (since,))
         else:
-            cursor.execute("SELECT * FROM signals")
+            cursor.execute("SELECT * FROM signals ORDER BY id ASC")
         rows = [dict(r) for r in cursor.fetchall()]
 
     total_signals = len(rows)
@@ -620,11 +631,34 @@ def is_kill_switch_active() -> Tuple[bool, str]:
     return False, ""
 
 
-def trigger_kill_switch(reason: str):
-    """Активирует аварийный Kill Switch на текущие сутки UTC."""
+def is_kill_switch_manually_overridden() -> bool:
+    """Проверяет, был ли Kill Switch принудительно отключен пользователем сегодня."""
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     with get_db() as cursor:
-        for k, v in [("kill_switch_active", "true"), ("kill_switch_date", today_str), ("kill_switch_reason", str(reason))]:
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'kill_switch_manual_override'")
+        override_row = cursor.fetchone()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = 'kill_switch_override_date'")
+        date_row = cursor.fetchone()
+        if override_row and override_row["value"].lower() == "true":
+            if date_row and date_row["value"] == today_str:
+                return True
+    return False
+
+
+def trigger_kill_switch(reason: str, force: bool = False):
+    """Активирует аварийный Kill Switch на текущие сутки UTC (если не было ручного снятия)."""
+    if not force and is_kill_switch_manually_overridden():
+        logger.info(f"Kill Switch пропущен: пользователь вручную разрешил торговлю на сегодня ({reason})")
+        return
+
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    with get_db() as cursor:
+        for k, v in [
+            ("kill_switch_active", "true"),
+            ("kill_switch_date", today_str),
+            ("kill_switch_reason", str(reason)),
+            ("kill_switch_manual_override", "false")
+        ]:
             sql = _adapt_sql("""
                 INSERT INTO bot_settings (key, value) VALUES (?, ?)
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
@@ -634,12 +668,18 @@ def trigger_kill_switch(reason: str):
 
 
 def reset_kill_switch():
-    """Сбрасывает флаг аварийного Kill Switch."""
+    """Сбрасывает флаг аварийного Kill Switch и запоминает ручную разблокировку на текущий день."""
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
     with get_db() as cursor:
-        sql = _adapt_sql("""
-            INSERT INTO bot_settings (key, value) VALUES (?, ?)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-        """)
-        cursor.execute(sql, ("kill_switch_active", "false"))
-    logger.info("🔓 Kill Switch сброшен. Торговля разблокирована.")
+        for k, v in [
+            ("kill_switch_active", "false"),
+            ("kill_switch_manual_override", "true"),
+            ("kill_switch_override_date", today_str)
+        ]:
+            sql = _adapt_sql("""
+                INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """)
+            cursor.execute(sql, (k, v))
+    logger.info("🔓 Kill Switch сброшен. Ручная разблокировка зафиксирована на сегодня.")
 

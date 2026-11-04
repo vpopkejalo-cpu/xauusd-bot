@@ -40,6 +40,7 @@ from config import (
     RETRAIN_INTERVAL_HOURS,
     ATR_PERIOD,
     NEWS_FILTER_ENABLED,
+    DEMO_MODE,
     KILL_SWITCH_ENABLED,
     KILL_SWITCH_MAX_DAILY_SIGNALS
 )
@@ -207,7 +208,7 @@ def main():
             ks_active, ks_reason = is_kill_switch_active()
 
             # Если Kill Switch еще не был зафиксирован в БД, оцениваем дневные показатели
-            if not ks_active and KILL_SWITCH_ENABLED:
+            if not ks_active and KILL_SWITCH_ENABLED and not DEMO_MODE:
                 should_trigger, trigger_reason = evaluate_kill_switch(daily_stats)
                 if should_trigger:
                     trigger_kill_switch(trigger_reason)
@@ -220,13 +221,8 @@ def main():
                         except Exception as ex:
                             logger.error(f"Не удалось отправить уведомление о Kill Switch: {ex}")
 
-            if ks_active:
-                logger.info(f"🛑 Торговля остановлена АВАРИЙНЫМ KILL SWITCH: {ks_reason}. Новые сигналы заморожены.")
-                for _ in range(POLL_INTERVAL_SECONDS):
-                    if not running or is_bot_paused():
-                        break
-                    time.sleep(1)
-                continue
+            if ks_active and not DEMO_MODE:
+                logger.info(f"🛑 Kill Switch активен: {ks_reason}. Генерация сигналов приостановлена. Анализ свечей продолжается 24/7.")
             else:
                 last_kill_switch_alert_sent = False
 
@@ -273,16 +269,16 @@ def main():
                             log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Вне сессии / Флэт", block_reason)
                             continue
 
-                        # 4. ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ПО ЭТОМУ АКТИВУ
+                        # 4. ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ПО ЭТОМУ АКТИВУ (в боевом режиме)
                         sym_signals_today = get_today_symbol_signal_count(sym)
                         max_sym_signals = profile.get("max_signals_per_day", 3)
-                        if sym_signals_today >= max_sym_signals:
+                        if not DEMO_MODE and sym_signals_today >= max_sym_signals:
                             logger.info(f"[{sym}] Достигнут лимит сигналов на день ({sym_signals_today}/{max_sym_signals}). Отдых.")
                             log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит актива", f"{sym_signals_today}/{max_sym_signals} сигналов")
                             continue
 
-                        # 5. ОБЩИЙ ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ВСЕГО БОТА
-                        if daily_stats.get("total_signals", 0) >= KILL_SWITCH_MAX_DAILY_SIGNALS:
+                        # 5. ОБЩИЙ ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ВСЕГО БОТА (в боевом режиме)
+                        if not DEMO_MODE and daily_stats.get("total_signals", 0) >= KILL_SWITCH_MAX_DAILY_SIGNALS:
                             logger.info(f"[{sym}] Достигнут дневной потолок сигналов ({KILL_SWITCH_MAX_DAILY_SIGNALS}).")
                             log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит бота", "Защита от овертрейдинга")
                             continue

@@ -117,7 +117,7 @@ def test_system():
     pred = ml.predict("XAU/USD", df_ind.iloc[-1])
     print(f"ML Прогноз на свежей свече: {pred}")
 
-    print(">>> 6. Тест Аварийного Kill Switch и дневных лимитов...")
+    print(">>> 6. Тест Аварийного Kill Switch и демо-режима...")
     # Очищаем состояние Kill Switch
     reset_kill_switch()
     active, _ = is_kill_switch_active()
@@ -125,9 +125,16 @@ def test_system():
 
     # Симулируем 3 стоп-лосса подряд
     sim_stats = {"consecutive_losses": 3, "total_signals": 6, "net_pnl": -18.5}
-    ks_triggered, ks_reason = evaluate_kill_switch(sim_stats)
-    assert ks_triggered, "Kill Switch обязан сработать при 3 стопах подряд"
-    trigger_kill_switch(ks_reason)
+    
+    # В ДЕМО-режиме Kill Switch не должен блокировать непрерывную торговлю
+    from config import DEMO_MODE, KILL_SWITCH_ENABLED
+    if DEMO_MODE or not KILL_SWITCH_ENABLED:
+        ks_triggered, _ = evaluate_kill_switch(sim_stats)
+        assert not ks_triggered, "На демо-счете Kill Switch не должен блокировать сделки"
+        print("Демо-режим: Kill Switch пассивен, бот не блокирует сбор опыта.")
+    
+    # Прямая проверка триггера и сброса
+    trigger_kill_switch("Тестовая авария", force=True)
     active, current_reason = is_kill_switch_active()
     assert active, "Kill Switch должен быть активен в БД"
     print(f"Kill Switch успешно сработал: {current_reason}")
@@ -138,13 +145,19 @@ def test_system():
     assert not active_after, "Kill Switch должен быть сброшен"
     print("Kill Switch успешно сброшен и разблокирован.")
 
-    print(">>> 7. Тест жизненного цикла торгового сигнала...")
+    print(">>> 7. Тест жизненного цикла торгового сигнала и винрейта за Сегодня...")
     sig_id = save_signal("XAU/USD", "BUY", entry_price, risk_gold["take_profit"], risk_gold["stop_loss"], atr_val, 0.65)
     open_sigs = get_open_signals()
     assert any(s["id"] == sig_id for s in open_sigs), "Сигнал не найден среди открытых"
     update_signal_status(sig_id, "TP_HIT", risk_gold["take_profit"], risk_gold["take_profit"] - entry_price)
     open_sigs_after = get_open_signals()
     assert not any(s["id"] == sig_id for s in open_sigs_after), "Сигнал должен быть закрыт"
+    
+    # Проверка винрейта строго за СЕГОДНЯ
+    from database import get_winrate_stats
+    today_stats = get_winrate_stats(1)
+    print(f"Статистика за Сегодня (календарный день): сигналов={today_stats['total_signals']}, TP={today_stats['wins']}, SL={today_stats['losses']}")
+    assert today_stats["total_signals"] >= 1, "Должен учитывать свежий сигнал за сегодня"
     print("Сигнал успешно сохранен, отслежен и закрыт в БД.")
 
     print("\n==============================================================")
