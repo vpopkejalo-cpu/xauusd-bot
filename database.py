@@ -120,6 +120,7 @@ def init_db():
             """)
             try:
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
             except Exception:
                 pass
 
@@ -195,6 +196,8 @@ def init_db():
                 cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
                 if "message_id" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
+                if "entered_at" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
             except Exception:
                 pass
 
@@ -479,6 +482,15 @@ def set_signal_message_id(signal_id: int, message_id: int):
     sql = _adapt_sql("UPDATE signals SET message_id = ? WHERE id = ?")
     with get_db() as cursor:
         cursor.execute(sql, (int(message_id), int(signal_id)))
+
+
+def set_signal_entered_at(signal_id: int):
+    """Записывает момент нажатия кнопки 'Вошел в сделку' (UTC ISO-формат)."""
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).isoformat()
+    sql = _adapt_sql("UPDATE signals SET entered_at = ? WHERE id = ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (now_str, int(signal_id)))
 
 
 def get_open_signals() -> List[Dict[str, Any]]:

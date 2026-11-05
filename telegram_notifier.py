@@ -36,7 +36,8 @@ from database import (
     set_bot_paused,
     is_bot_paused,
     request_retrain,
-    set_signal_message_id
+    set_signal_message_id,
+    set_signal_entered_at
 )
 
 logger = logging.getLogger(__name__)
@@ -454,7 +455,7 @@ class TelegramNotifier:
                     dir_txt = s['direction']
                     report += f"• #{s['id']} <b>{sym}</b> {dir_txt} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})\n"
                     inline_rows.append([
-                        {"text": f"🎯 #{s['id']} {s.get('created_at','')[11:16]} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
                 report += "\n<i>👇 Нажмите на кнопку сделки ниже, чтобы открыть её карточку:</i>"
 
@@ -557,6 +558,9 @@ class TelegramNotifier:
 
         if action == "enter":
             self.answer_callback_query(cb_id, "Сделка принята! Укажите результат после ее закрытия.", show_alert=False)
+            # Фиксируем точное время входа в сделку
+            if sig_id:
+                set_signal_entered_at(sig_id)
             new_text = orig_text + "\n\n<b>Статус:</b> ВЫ В СДЕЛКЕ 🟢\n<i>Когда закроете позицию брокера, нажмите результат:</i>"
             markup = {
                 "inline_keyboard": [
@@ -671,7 +675,7 @@ class TelegramNotifier:
                 for s in open_sigs:
                     sym = s.get('symbol', 'XAU/USD')
                     inline_buttons.append([
-                        {"text": f"🎯 #{s['id']} {s.get('created_at','')[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
 
             # Статус Kill Switch и лимиты
@@ -745,7 +749,7 @@ class TelegramNotifier:
                 for s in open_sigs:
                     sym = s.get('symbol', 'XAU/USD')
                     pause_btns.append([
-                        {"text": f"🎯 #{s['id']} {s.get('created_at','')[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
                 pause_btns.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
                 self.send_raw_message(block_msg, reply_markup={"inline_keyboard": pause_btns})
