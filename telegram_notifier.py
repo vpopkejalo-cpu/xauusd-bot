@@ -42,6 +42,23 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
+# Часовой пояс пользователя (Молдова)
+_USER_TZ = "Europe/Chisinau"
+
+
+def _utc_to_local_hhmm(utc_iso: str) -> str:
+    """Конвертирует UTC ISO-строку в HH:MM по местному времени пользователя (Europe/Chisinau).
+    Если конвертация не удалась — возвращает UTC HH:MM как запасной вариант."""
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(utc_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo(_USER_TZ)).strftime("%H:%M")
+    except Exception:
+        return utc_iso[11:16] if len(utc_iso) >= 16 else ""
+
 
 def format_efficiency_rating(winrate: float, finished_count: int) -> str:
     """Возвращает честный и профессиональный рейтинг эффективности торговли."""
@@ -455,7 +472,7 @@ class TelegramNotifier:
                     dir_txt = s['direction']
                     report += f"• #{s['id']} <b>{sym}</b> {dir_txt} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})\n"
                     inline_rows.append([
-                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
                 report += "\n<i>👇 Нажмите на кнопку сделки ниже, чтобы открыть её карточку:</i>"
 
@@ -675,7 +692,7 @@ class TelegramNotifier:
                 for s in open_sigs:
                     sym = s.get('symbol', 'XAU/USD')
                     inline_buttons.append([
-                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
 
             # Статус Kill Switch и лимиты
@@ -749,7 +766,7 @@ class TelegramNotifier:
                 for s in open_sigs:
                     sym = s.get('symbol', 'XAU/USD')
                     pause_btns.append([
-                        {"text": f"🎯 #{s['id']} {(s.get('entered_at') or s.get('created_at',''))[11:16]} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
                     ])
                 pause_btns.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
                 self.send_raw_message(block_msg, reply_markup={"inline_keyboard": pause_btns})
