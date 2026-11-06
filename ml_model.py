@@ -382,19 +382,63 @@ class TradingMLModel:
 
             logger.debug(f"[{symbol}] ML Прогноз: BUY={buy_prob:.1%}, SELL={sell_prob:.1%}, Порог={min_prob:.1%}")
 
+            # Извлекаем веса модели и вклад каждого признака (Feature Attribution)
+            feature_diagnostics: Dict[str, Any] = {}
+            try:
+                scaler = pipeline.named_steps.get("scaler")
+                clf = pipeline.named_steps.get("classifier")
+                if scaler is not None and clf is not None and hasattr(clf, "coef_"):
+                    scaled_vals = scaler.transform(features_df)[0]
+                    coefs = clf.coef_[0]
+                    intercept = float(clf.intercept_[0]) if hasattr(clf, "intercept_") else 0.0
+                    contributions = coefs * scaled_vals
+
+                    feat_list = []
+                    for col_name, w, s_val, cont in zip(FEATURE_COLUMNS, coefs, scaled_vals, contributions):
+                        raw_v = float(candle[col_name]) if pd.notna(candle[col_name]) else 0.0
+                        feat_list.append({
+                            "name": col_name,
+                            "raw_value": round(raw_v, 4),
+                            "scaled_value": round(float(s_val), 4),
+                            "weight": round(float(w), 4),
+                            "contribution": round(float(cont), 4),
+                            "bias": "BUY" if cont > 0 else "SELL"
+                        })
+
+                    bullish_feats = sorted([f for f in feat_list if f["contribution"] > 0], key=lambda x: x["contribution"], reverse=True)
+                    bearish_feats = sorted([f for f in feat_list if f["contribution"] < 0], key=lambda x: x["contribution"])
+                    primary_driver = sorted(feat_list, key=lambda x: abs(x["contribution"]), reverse=True)[0] if feat_list else None
+
+                    feature_diagnostics = {
+                        "model_accuracy": float(self.accuracies.get(symbol, self.last_accuracy)),
+                        "samples_count": int(self.samples_counts.get(symbol, self.samples_count)),
+                        "buy_probability": round(buy_prob, 4),
+                        "sell_probability": round(sell_prob, 4),
+                        "min_probability": round(min_prob, 4),
+                        "intercept": round(intercept, 4),
+                        "features": feat_list,
+                        "top_bullish": [f["name"] for f in bullish_feats[:3]],
+                        "top_bearish": [f["name"] for f in bearish_feats[:3]],
+                        "primary_driver": primary_driver["name"] if primary_driver else ""
+                    }
+            except Exception as ex_diag:
+                logger.debug(f"[{symbol}] Ошибка извлечения весов признаков: {ex_diag}")
+
             # 1. Покупка BUY при превышении индивидуального порога актива
             if buy_prob >= min_prob:
                 return {
                     "action": "BUY",
                     "probability": buy_prob,
-                    "reason": f"Вероятность роста {buy_prob:.1%} >= порога {min_prob:.1%}"
+                    "reason": f"Вероятность роста {buy_prob:.1%} >= порога {min_prob:.1%}",
+                    "diagnostics": feature_diagnostics
                 }
             # 2. Продажа SELL при превышении индивидуального порога актива
             elif sell_prob >= min_prob:
                 return {
                     "action": "SELL",
                     "probability": sell_prob,
-                    "reason": f"Вероятность падения {sell_prob:.1%} >= порога {min_prob:.1%}"
+                    "reason": f"Вероятность падения {sell_prob:.1%} >= порога {min_prob:.1%}",
+                    "diagnostics": feature_diagnostics
                 }
             # 3. Нейтральная зона
             else:
@@ -402,7 +446,8 @@ class TradingMLModel:
                 return {
                     "action": "HOLD",
                     "probability": max_prob,
-                    "reason": f"Уверенность {max_prob:.1%} ниже порога {min_prob:.1%} — нет устойчивого преимущества"
+                    "reason": f"Уверенность {max_prob:.1%} ниже порога {min_prob:.1%} — нет устойчивого преимущества",
+                    "diagnostics": feature_diagnostics
                 }
 
         except Exception as e:

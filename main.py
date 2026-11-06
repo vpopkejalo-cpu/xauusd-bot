@@ -370,7 +370,77 @@ def main():
                                 levels = calculate_risk_levels(action, close_p, atr_val, symbol=sym)
                                 session_name = get_current_trading_session_name(now_utc)
 
-                                # Сохранение в базу данных
+                                # Собираем исчерпывающие диагностические данные для детального анализа сделки
+                                try:
+                                    from zoneinfo import ZoneInfo
+                                    local_dt = now_utc.astimezone(ZoneInfo("Europe/Chisinau"))
+                                    local_time_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+                                    is_after_17 = local_dt.hour >= 17
+                                except Exception:
+                                    local_time_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                                    is_after_17 = False
+
+                                diagnostic_payload = {
+                                    "symbol": sym,
+                                    "direction": action,
+                                    "created_at_utc": now_utc.isoformat(),
+                                    "created_at_local": local_time_str,
+                                    "is_after_17_chisinau": is_after_17,
+                                    "session_name": session_name,
+                                    "category": profile.get("category", ""),
+                                    "prices": {
+                                        "open": float(latest_candle.get("open", close_p)),
+                                        "high": float(latest_candle.get("high", close_p)),
+                                        "low": float(latest_candle.get("low", close_p)),
+                                        "close": float(close_p),
+                                        "volume": float(latest_candle.get("volume", 0.0))
+                                    },
+                                    "indicators": {
+                                        "rsi": float(latest_candle.get("rsi", 50.0)),
+                                        "atr": float(atr_val),
+                                        "atr_pct": float(latest_candle.get("atr_pct", 0.0)),
+                                        "adx": float(adx_val),
+                                        "plus_di": float(latest_candle.get("plus_di", 0.0)),
+                                        "minus_di": float(latest_candle.get("minus_di", 0.0)),
+                                        "macd": float(latest_candle.get("macd", 0.0)),
+                                        "macd_hist": float(latest_candle.get("macd_hist", 0.0)),
+                                        "ema_21": float(latest_candle.get("ema_21", close_p)),
+                                        "ema_50": float(latest_candle.get("ema_50", close_p)),
+                                        "ema_200": float(latest_candle.get("ema_200", close_p)),
+                                        "dist_ema_200": float(latest_candle.get("dist_ema_200", 0.0)),
+                                        "ema_trend": float(latest_candle.get("ema_trend", 0.0)),
+                                        "return_1": float(latest_candle.get("return_1", 0.0)),
+                                        "return_3": float(latest_candle.get("return_3", 0.0)),
+                                        "return_5": float(latest_candle.get("return_5", 0.0)),
+                                    },
+                                    "ml_prediction": prediction.get("diagnostics", {}),
+                                    "ml_action": action,
+                                    "ml_probability": float(prob),
+                                    "ml_reason": reason,
+                                    "news": {
+                                        "shield_active": bool(news_info.get("shield_active", False)),
+                                        "shield_reason": str(news_info.get("shield_reason", "")),
+                                        "score": float(news_info.get("score", 0.0)),
+                                        "label": str(news_info.get("label", "Neutral")),
+                                        "top_headline": str(news_info.get("top_headline", "")),
+                                        "source": str(news_info.get("source", ""))
+                                    },
+                                    "risk": {
+                                        "entry_price": float(levels["entry_price"]),
+                                        "take_profit": float(levels["take_profit"]),
+                                        "stop_loss": float(levels["stop_loss"]),
+                                        "risk_reward_ratio": float(levels.get("risk_reward_ratio", 1.33)),
+                                        "recommended_lot": float(levels.get("recommended_lot", 0.01)),
+                                        "sl_distance": float(levels.get("sl_distance", 0.0)),
+                                        "tp_distance": float(levels.get("tp_distance", 0.0))
+                                    },
+                                    "asset_profile": {
+                                        "min_adx": profile.get("min_adx"),
+                                        "min_probability": profile.get("min_probability")
+                                    }
+                                }
+
+                                # Сохранение в базу данных с расширенным диагностическим пакетом
                                 sig_id = save_signal(
                                     symbol=sym,
                                     direction=action,
@@ -378,7 +448,8 @@ def main():
                                     take_profit=levels["take_profit"],
                                     stop_loss=levels["stop_loss"],
                                     atr=levels["atr"],
-                                    probability=prob
+                                    probability=prob,
+                                    diagnostic_data=diagnostic_payload
                                 )
 
                                 logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} @ {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")

@@ -83,7 +83,7 @@ def get_main_keyboard(is_paused: bool = False) -> Dict:
         "keyboard": [
             [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
             [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
-            [{"text": "🔄 Переобучить модель"}]
+            [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
@@ -210,6 +210,47 @@ class TelegramNotifier:
             requests.post(url, json=payload, timeout=5)
         except Exception as e:
             logger.warning(f"Не удалось ответить на callback: {e}")
+
+    def send_document(
+        self,
+        file_content: Any,
+        filename: str,
+        caption: str = "",
+        parse_mode: str = "HTML"
+    ) -> bool:
+        """Отправляет документ (текстовый отчет, CSV, логи) пользователю в Telegram."""
+        if not self.bot_token or not self.chat_id:
+            logger.warning("Telegram Bot Token или Chat ID не заданы. Пропуск отправки файла.")
+            return False
+
+        url = f"{self.base_url}/sendDocument"
+
+        if isinstance(file_content, str):
+            file_bytes = file_content.encode("utf-8")
+        else:
+            file_bytes = file_content
+
+        mime_type = "text/csv; charset=utf-8" if filename.endswith(".csv") else "text/plain; charset=utf-8"
+        files = {
+            "document": (filename, file_bytes, mime_type)
+        }
+        data = {
+            "chat_id": self.chat_id,
+            "caption": caption[:1024],
+            "parse_mode": parse_mode
+        }
+
+        try:
+            response = requests.post(url, data=data, files=files, timeout=30)
+            if response.status_code == 200 and response.json().get("ok"):
+                logger.info(f"Файл '{filename}' успешно доставлен в Telegram.")
+                return True
+            else:
+                logger.error(f"Ошибка отправки документа '{filename}' в Telegram: HTTP {response.status_code}, Ответ: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Сетевой сбой при отправке документа '{filename}' в Telegram: {e}")
+            return False
 
     def send_startup_notification(self, interval: str, min_prob: float, symbols: Optional[list] = None):
         """Отправляет тестовое приветственное сообщение при старте бота с нативной клавиатурой."""
@@ -810,6 +851,35 @@ class TelegramNotifier:
             except Exception as e:
                 logger.warning(f"Не удалось отправить статистику за день при паузе: {e}")
 
+            # Автоматически генерируем глубокий аналитический файл с весами модели и отправляем в чат
+            try:
+                from report_generator import generate_diagnostics_report
+                report_data = generate_diagnostics_report(days=1)
+                sig_count = report_data.get("signals_count", 0)
+
+                caption = (
+                    "📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 Сигналов в анализе: <b>{sig_count}</b>\n"
+                    f"🎯 Винрейт: <b>{report_data.get('winrate')}%</b> | PnL: <b>{report_data.get('pnl_str')}</b>\n\n"
+                    f"☀️ До 17:00 (Европа): {report_data.get('day_signals', 0)} сигн. (Винрейт {report_data.get('day_winrate', 0)}%)\n"
+                    f"🌙 После 17:00 (США): {report_data.get('evening_signals', 0)} сигн. (Винрейт {report_data.get('evening_winrate', 0)}%)\n\n"
+                    "🔍 <i>В прикрепленных файлах: полный расклад весов каждого индикатора, влияние новостей, разбор поведения после 17:00 и динамика переобучения весов.</i>"
+                )
+                self.send_document(
+                    file_content=report_data["txt_content"],
+                    filename=report_data["txt_filename"],
+                    caption=caption
+                )
+                if report_data.get("csv_content"):
+                    self.send_document(
+                        file_content=report_data["csv_content"],
+                        filename=report_data["csv_filename"],
+                        caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
+                    )
+            except Exception as e:
+                logger.error(f"Не удалось сформировать или отправить диагностический отчет при паузе: {e}", exc_info=True)
+
         # 4. Кнопка "▶️ Запустить бота" / "Старт"
         elif "запустить" in lower_text or lower_text in ("старт", "start", "/start"):
             set_bot_paused(False)
@@ -843,6 +913,38 @@ class TelegramNotifier:
             reset_kill_switch()
             reply = "🔓 <b>Аварийный Kill Switch сброшен вручную!</b>\nСканирование рынка и генерация сигналов разблокированы."
             self.send_raw_message(reply, reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 8. Кнопка "📄 Логи сделок" / /report / /logs
+        elif "лог" in lower_text or "отчет" in lower_text or lower_text in ("/report", "report", "/logs", "logs"):
+            try:
+                from report_generator import generate_diagnostics_report
+                self.send_raw_message("⏳ <i>Формирую подробный файл с весами модели и логами сделок...</i>", reply_markup=get_main_keyboard(is_bot_paused()))
+                report_data = generate_diagnostics_report(days=1)
+                sig_count = report_data.get("signals_count", 0)
+
+                caption = (
+                    "📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 Сигналов в анализе: <b>{sig_count}</b>\n"
+                    f"🎯 Винрейт: <b>{report_data.get('winrate')}%</b> | PnL: <b>{report_data.get('pnl_str')}</b>\n\n"
+                    f"☀️ До 17:00 (Европа): {report_data.get('day_signals', 0)} сигн. (Винрейт {report_data.get('day_winrate', 0)}%)\n"
+                    f"🌙 После 17:00 (США): {report_data.get('evening_signals', 0)} сигн. (Винрейт {report_data.get('evening_winrate', 0)}%)\n\n"
+                    "🔍 <i>В прикрепленных файлах: полный расклад весов каждого индикатора, влияние новостей, разбор поведения после 17:00 и динамика переобучения весов.</i>"
+                )
+                self.send_document(
+                    file_content=report_data["txt_content"],
+                    filename=report_data["txt_filename"],
+                    caption=caption
+                )
+                if report_data.get("csv_content"):
+                    self.send_document(
+                        file_content=report_data["csv_content"],
+                        filename=report_data["csv_filename"],
+                        caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при формировании диагностического отчета по запросу: {e}", exc_info=True)
+                self.send_raw_message(f"❌ <b>Ошибка генерации отчета:</b> {e}", reply_markup=get_main_keyboard(is_bot_paused()))
 
         else:
             # Неизвестная команда — просто возвращаем кнопки меню

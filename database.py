@@ -7,6 +7,7 @@
 """
 
 import os
+import json
 import sqlite3
 import pandas as pd
 from datetime import datetime
@@ -121,6 +122,7 @@ def init_db():
             try:
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
             except Exception:
                 pass
 
@@ -198,6 +200,8 @@ def init_db():
                     cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
                 if "entered_at" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
+                if "diagnostic_data" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN diagnostic_data TEXT")
             except Exception:
                 pass
 
@@ -437,15 +441,18 @@ def save_signal(
     take_profit: float,
     stop_loss: float,
     atr: float,
-    probability: float
+    probability: float,
+    diagnostic_data: Optional[Dict[str, Any]] = None
 ) -> int:
-    """Сохраняет сигнал в базу данных и возвращает его ID."""
+    """Сохраняет сигнал в базу данных (включая глубокие диагностические данные весов и контекста) и возвращает его ID."""
+    diag_json = json.dumps(diagnostic_data, ensure_ascii=False) if diagnostic_data else None
+
     with get_db() as cursor:
         if IS_POSTGRES:
             cursor.execute("""
                 INSERT INTO signals (
-                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN')
+                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status, diagnostic_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s)
                 RETURNING id
             """, (
                 datetime.utcnow().isoformat(),
@@ -455,15 +462,16 @@ def save_signal(
                 float(take_profit),
                 float(stop_loss),
                 float(atr),
-                float(probability)
+                float(probability),
+                diag_json
             ))
             row = cursor.fetchone()
             return row["id"] if row else 0
         else:
             cursor.execute("""
                 INSERT INTO signals (
-                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status, diagnostic_data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """, (
                 datetime.utcnow().isoformat(),
                 str(symbol),
@@ -472,7 +480,8 @@ def save_signal(
                 float(take_profit),
                 float(stop_loss),
                 float(atr),
-                float(probability)
+                float(probability),
+                diag_json
             ))
             return cursor.lastrowid
 
@@ -552,6 +561,44 @@ def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
             float(accuracy),
             str(notes)
         ))
+
+
+def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Возвращает список сигналов для формирования глубокого диагностического отчета.
+    Приоритетно возвращает сделки за сегодня (UTC), а если их нет — последние `limit` сигналов.
+    Автоматически декодирует поле diagnostic_data из JSON.
+    """
+    if days == 1:
+        start_date = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
+    else:
+        start_date = (datetime.utcnow() - pd.Timedelta(days=days)).isoformat()
+
+    sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
+    with get_db() as cursor:
+        cursor.execute(sql, (start_date,))
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    # Если за выбранный период сделок нет, подтягиваем последние доступные
+    if not rows:
+        sql_fallback = _adapt_sql("SELECT * FROM signals ORDER BY id DESC LIMIT ?")
+        with get_db() as cursor:
+            cursor.execute(sql_fallback, (int(limit),))
+            rows = [dict(r) for r in cursor.fetchall()]
+            rows.reverse()
+
+    # Декодируем JSON диагностических данных
+    for r in rows:
+        diag_raw = r.get("diagnostic_data")
+        if isinstance(diag_raw, str):
+            try:
+                r["diagnostic_data"] = json.loads(diag_raw)
+            except Exception:
+                r["diagnostic_data"] = None
+        elif not isinstance(diag_raw, dict):
+            r["diagnostic_data"] = None
+
+    return rows
 
 
 def get_today_signal_stats() -> Dict[str, Any]:

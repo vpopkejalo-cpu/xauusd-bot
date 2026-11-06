@@ -160,6 +160,14 @@ def test_system():
     assert today_stats["total_signals"] >= 1, "Должен учитывать свежий сигнал за сегодня"
     print("Сигнал успешно сохранен, отслежен и закрыт в БД.")
 
+    print(">>> 8. Тест генератора глубоких диагностических логов (TXT/CSV) и весов...")
+    from report_generator import generate_diagnostics_report
+    rep = generate_diagnostics_report(days=1)
+    assert rep["signals_count"] >= 1, "Отчет должен содержать сегодняшние сигналы"
+    assert "ТАБЛИЦА ВЕСОВ" in rep["txt_content"] or "ДЕТАЛИЗАЦИЯ ВЕСОВ" in rep["txt_content"] or "ДЕЙСТВИЕ" in rep["txt_content"], "В отчете должен быть блок весов модели"
+    assert "csv_content" in rep and len(rep["csv_content"]) > 0, "CSV отчет не должен быть пустым"
+    print(f"Диагностический отчет успешно сгенерирован: сигналов={rep['signals_count']}, TXT={len(rep['txt_content'])} байт, CSV={len(rep['csv_content'])} байт")
+
     print("\n==============================================================")
     print("✅ ВСЕ МОДУЛИ, ИНДИВИДУАЛЬНЫЕ ПРОФИЛИ И ЗАЩИТА УСПЕШНО ПРОШЛИ ТЕСТ!")
     print("==============================================================")
