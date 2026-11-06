@@ -114,6 +114,7 @@ def get_winrate_period_keyboard() -> Dict:
 class TelegramNotifier:
     def __init__(self, token: str = TELEGRAM_BOT_TOKEN, chat_id: str = TELEGRAM_CHAT_ID):
         self.token = token
+        self.bot_token = token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.last_update_id = 0
@@ -219,7 +220,7 @@ class TelegramNotifier:
         parse_mode: str = "HTML"
     ) -> bool:
         """Отправляет документ (текстовый отчет, CSV, логи) пользователю в Telegram."""
-        if not self.bot_token or not self.chat_id:
+        if not self.token or not self.chat_id:
             logger.warning("Telegram Bot Token или Chat ID не заданы. Пропуск отправки файла.")
             return False
 
