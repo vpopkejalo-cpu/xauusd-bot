@@ -199,7 +199,11 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
             risk_info = diag.get("risk", {})
             if risk_info:
-                lines.append(f"   • Соотношение R:R: 1:{risk_info.get('risk_reward_ratio', 1.33):.2f} | Реком. лот: {risk_info.get('recommended_lot', 0.01)}")
+                rr_val = risk_info.get("risk_reward_ratio", "1:1.33")
+                rr_str = str(rr_val)
+                if not rr_str.startswith("1:"):
+                    rr_str = f"1:{rr_str}"
+                lines.append(f"   • Соотношение R:R: {rr_str} | Реком. лот: {risk_info.get('recommended_lot', 0.01)}")
 
             # Рыночный контекст и индикаторы
             m_ctx = diag.get("market_context") or diag.get("indicators") or {}

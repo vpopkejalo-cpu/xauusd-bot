@@ -429,7 +429,7 @@ def main():
                                         "entry_price": float(levels["entry_price"]),
                                         "take_profit": float(levels["take_profit"]),
                                         "stop_loss": float(levels["stop_loss"]),
-                                        "risk_reward_ratio": float(levels.get("risk_reward_ratio", 1.33)),
+                                        "risk_reward_ratio": str(levels.get("risk_reward_ratio", "1:1.33")),
                                         "recommended_lot": float(levels.get("recommended_lot", 0.01)),
                                         "sl_distance": float(levels.get("sl_distance", 0.0)),
                                         "tp_distance": float(levels.get("tp_distance", 0.0))
