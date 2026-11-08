@@ -373,22 +373,36 @@ class TradingMLModel:
                     "reason": f"[{symbol}] В векторе признаков есть NaN (период прогрева)"
                 }
 
-            classes = list(pipeline.classes_)
-            probabilities = pipeline.predict_proba(features_df)[0]
-            prob_map = dict(zip(classes, probabilities))
+            scaler = pipeline.named_steps.get("scaler")
+            clf = pipeline.named_steps.get("classifier")
 
+            # Защита от аномальных выбросов: клиппируем значения признаков диапазоном [-3.0, +3.0] сигмы
+            if scaler is not None and clf is not None and hasattr(clf, "classes_"):
+                scaled_matrix = np.clip(scaler.transform(features_df), -3.0, 3.0)
+                classes = list(clf.classes_)
+                probabilities = clf.predict_proba(scaled_matrix)[0]
+            else:
+                scaled_matrix = None
+                classes = list(pipeline.classes_)
+                probabilities = pipeline.predict_proba(features_df)[0]
+
+            prob_map = dict(zip(classes, probabilities))
             buy_prob = float(prob_map.get(CLASS_BUY, 0.5))
             sell_prob = float(prob_map.get(CLASS_SELL, 0.5))
 
-            logger.debug(f"[{symbol}] ML Прогноз: BUY={buy_prob:.1%}, SELL={sell_prob:.1%}, Порог={min_prob:.1%}")
+            # Калибровочный фильтр надежности модели
+            acc = float(self.accuracies.get(symbol, self.last_accuracy))
+            model_reliable = (acc >= 0.52)
+            # Если модель показала слабую точность CV (<52%), ужесточаем порог входа до 72%
+            effective_min_prob = min_prob if model_reliable else max(min_prob, 0.72)
+
+            logger.debug(f"[{symbol}] ML Прогноз: BUY={buy_prob:.1%}, SELL={sell_prob:.1%}, Порог={effective_min_prob:.1%} (CV: {acc:.1%})")
 
             # Извлекаем веса модели и вклад каждого признака (Feature Attribution)
             feature_diagnostics: Dict[str, Any] = {}
             try:
-                scaler = pipeline.named_steps.get("scaler")
-                clf = pipeline.named_steps.get("classifier")
                 if scaler is not None and clf is not None and hasattr(clf, "coef_"):
-                    scaled_vals = scaler.transform(features_df)[0]
+                    scaled_vals = scaled_matrix[0] if scaled_matrix is not None else np.clip(scaler.transform(features_df)[0], -3.0, 3.0)
                     coefs = clf.coef_[0]
                     intercept = float(clf.intercept_[0]) if hasattr(clf, "intercept_") else 0.0
                     contributions = coefs * scaled_vals
@@ -410,11 +424,12 @@ class TradingMLModel:
                     primary_driver = sorted(feat_list, key=lambda x: abs(x["contribution"]), reverse=True)[0] if feat_list else None
 
                     feature_diagnostics = {
-                        "model_accuracy": float(self.accuracies.get(symbol, self.last_accuracy)),
+                        "model_accuracy": acc,
+                        "model_reliable": model_reliable,
                         "samples_count": int(self.samples_counts.get(symbol, self.samples_count)),
                         "buy_probability": round(buy_prob, 4),
                         "sell_probability": round(sell_prob, 4),
-                        "min_probability": round(min_prob, 4),
+                        "min_probability": round(effective_min_prob, 4),
                         "intercept": round(intercept, 4),
                         "features": feat_list,
                         "top_bullish": [f["name"] for f in bullish_feats[:3]],
@@ -425,20 +440,24 @@ class TradingMLModel:
                 logger.debug(f"[{symbol}] Ошибка извлечения весов признаков: {ex_diag}")
 
             # 1. Покупка BUY при превышении индивидуального порога актива
-            if buy_prob >= min_prob:
+            if buy_prob >= effective_min_prob:
+                reliability_note = "" if model_reliable else f" [Повышенный порог {effective_min_prob:.1%}, CV={acc:.1%}]"
                 return {
                     "action": "BUY",
                     "probability": buy_prob,
-                    "reason": f"Вероятность роста {buy_prob:.1%} >= порога {min_prob:.1%}",
-                    "diagnostics": feature_diagnostics
+                    "reason": f"Вероятность роста {buy_prob:.1%} >= порога {effective_min_prob:.1%}{reliability_note}",
+                    "diagnostics": feature_diagnostics,
+                    "model_reliable": model_reliable
                 }
             # 2. Продажа SELL при превышении индивидуального порога актива
-            elif sell_prob >= min_prob:
+            elif sell_prob >= effective_min_prob:
+                reliability_note = "" if model_reliable else f" [Повышенный порог {effective_min_prob:.1%}, CV={acc:.1%}]"
                 return {
                     "action": "SELL",
                     "probability": sell_prob,
-                    "reason": f"Вероятность падения {sell_prob:.1%} >= порога {min_prob:.1%}",
-                    "diagnostics": feature_diagnostics
+                    "reason": f"Вероятность падения {sell_prob:.1%} >= порога {effective_min_prob:.1%}{reliability_note}",
+                    "diagnostics": feature_diagnostics,
+                    "model_reliable": model_reliable
                 }
             # 3. Нейтральная зона
             else:
@@ -446,8 +465,9 @@ class TradingMLModel:
                 return {
                     "action": "HOLD",
                     "probability": max_prob,
-                    "reason": f"Уверенность {max_prob:.1%} ниже порога {min_prob:.1%} — нет устойчивого преимущества",
-                    "diagnostics": feature_diagnostics
+                    "reason": f"Уверенность {max_prob:.1%} ниже порога {effective_min_prob:.1%} — нет устойчивого преимущества",
+                    "diagnostics": feature_diagnostics,
+                    "model_reliable": model_reliable
                 }
 
         except Exception as e:

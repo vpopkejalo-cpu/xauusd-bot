@@ -70,7 +70,10 @@ from risk_manager import (
     calculate_risk_levels,
     check_asset_trading_allowed,
     evaluate_kill_switch,
-    get_asset_profile
+    get_asset_profile,
+    detect_market_regime,
+    check_pyramiding_allowed,
+    check_symbol_consecutive_losses
 )
 from telegram_notifier import TelegramNotifier
 
@@ -269,6 +272,16 @@ def main():
                             log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Вне сессии / Флэт", block_reason)
                             continue
 
+                        # 3.1. ЗАЩИТНЫЙ ТАЙМ-АУТ ПОСЛЕ СЕРИИ СТОПОВ ПО АКТИВУ
+                        loss_ok, loss_reason = check_symbol_consecutive_losses(sym, cooldown_minutes=90)
+                        if not loss_ok:
+                            logger.info(loss_reason)
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Тайм-аут актива", loss_reason)
+                            continue
+
+                        # 3.2. MARKET REGIME ENGINE: Определение режима рынка (Тренд vs Флэт)
+                        regime_info = detect_market_regime(latest_candle)
+
                         # 4. ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ПО ЭТОМУ АКТИВУ (в боевом режиме)
                         sym_signals_today = get_today_symbol_signal_count(sym)
                         max_sym_signals = profile.get("max_signals_per_day", 3)
@@ -296,18 +309,52 @@ def main():
                         prob = prediction["probability"]
                         reason = prediction["reason"]
 
-                        logger.info(f"[{sym}] ML Вердикт: {action} ({prob:.1%}) — {reason}")
+                        logger.info(f"[{sym}] ML Вердикт: {action} ({prob:.1%}) — {reason} | Режим: {regime_info['regime']}")
                         outcome_label = f"ML {action}"
 
-                        # 8. СТРУКТУРНЫЙ И МУЛЬТИ-ТАЙМФРЕЙМ ФИЛЬТР ТРЕНДА (EMA 200 / EMA 50 / RSI)
+                        # 8. СТРУКТУРНЫЙ, РЕЖИМНЫЙ И МУЛЬТИ-ТАЙМФРЕЙМ ФИЛЬТР
                         if action in ("BUY", "SELL"):
                             ema_200 = float(latest_candle.get("ema_200", close_p))
                             ema_50 = float(latest_candle.get("ema_50", close_p))
                             ema_21 = float(latest_candle.get("ema_21", close_p))
                             rsi_val = float(latest_candle.get("rsi", 50.0))
+                            rsi_diff = float(latest_candle.get("rsi_diff", 0.0))
+                            htf_trend = float(latest_candle.get("htf_trend", 0.0))
 
-                            if action == "BUY":
-                                # Запрет покупок против среднесрочного тренда (EMA 200)
+                            # 8.1. СООТВЕТСТВИЕ РЕЖИМУ РЫНКА (Запрет контртренда в сильном тренде!)
+                            if action == "BUY" and not regime_info["allow_buy"]:
+                                logger.info(f"[{sym}] BUY заблокирован: {regime_info['description']}. Запрет покупки против нисходящего тренда.")
+                                action = "HOLD"
+                                outcome_label = "❌ Контртренд (Bear Trend)"
+                            elif action == "SELL" and not regime_info["allow_sell"]:
+                                logger.info(f"[{sym}] SELL заблокирован: {regime_info['description']}. Запрет продажи против восходящего тренда.")
+                                action = "HOLD"
+                                outcome_label = "❌ Контртренд (Bull Trend)"
+
+                            # 8.2. СТАРШИЙ ЧАСОВОЙ ТРЕНД (HTF H1 Proxy)
+                            elif action == "BUY" and htf_trend < 0.0 and profile.get("strict_ema200", True):
+                                if prob < 0.72:
+                                    logger.info(f"[{sym}] BUY отклонен: старший часовой тренд H1 нисходящий (уверенность {prob:.1%} < 72%).")
+                                    action = "HOLD"
+                                    outcome_label = "❌ Против H1 тренда"
+                            elif action == "SELL" and htf_trend > 0.0 and profile.get("strict_ema200", True):
+                                if prob < 0.72:
+                                    logger.info(f"[{sym}] SELL отклонен: старший часовой тренд H1 восходящий (уверенность {prob:.1%} < 72%).")
+                                    action = "HOLD"
+                                    outcome_label = "❌ Против H1 тренда"
+
+                            # 8.3. ЗАЩИТА ОТ ЛОВЛИ ПАДАЮЩИХ НОЖЕЙ (RSI Hook)
+                            elif action == "BUY" and rsi_val < 32.0 and rsi_diff < 0.0:
+                                logger.info(f"[{sym}] BUY отклонен: ловля падающего ножа (RSI={rsi_val:.1f} падает, разворотный крюк отсутствует).")
+                                action = "HOLD"
+                                outcome_label = "❌ Ловля ножа (RSI падает)"
+                            elif action == "SELL" and rsi_val > 68.0 and rsi_diff > 0.0:
+                                logger.info(f"[{sym}] SELL отклонен: продажа против ракеты (RSI={rsi_val:.1f} растет, разворотный крюк отсутствует).")
+                                action = "HOLD"
+                                outcome_label = "❌ Шорт против ракеты"
+
+                            # 8.4. КЛАССИЧЕСКИЙ ФИЛЬТР СРЕДНИХ (EMA 200 / EMA 50)
+                            elif action == "BUY":
                                 if profile.get("strict_ema200", True) and close_p < ema_200:
                                     logger.info(f"[{sym}] BUY отклонен: цена ({close_p:.2f}) ниже базовой EMA 200 ({ema_200:.2f}). Тренд нисходящий.")
                                     action = "HOLD"
@@ -322,7 +369,6 @@ def main():
                                     outcome_label = f"❌ Перекуплен RSI={rsi_val:.1f}"
 
                             elif action == "SELL":
-                                # Запрет продаж против среднесрочного тренда (EMA 200)
                                 if profile.get("strict_ema200", True) and close_p > ema_200:
                                     logger.info(f"[{sym}] SELL отклонен: цена ({close_p:.2f}) выше базовой EMA 200 ({ema_200:.2f}). Тренд восходящий.")
                                     action = "HOLD"
@@ -346,138 +392,153 @@ def main():
                             action = "HOLD"
                             outcome_label = "❌ Позитивные новости"
 
-                        # 10. ГЕНЕРАЦИЯ И ОТПРАВКА СИГНАЛА
+                        # 10. ГЕНЕРАЦИЯ СИГНАЛА И ДВИЖОК ПИРАМИДИНГА (ДОЛИВКА В ПРИБЫЛЬ)
                         if action in ("BUY", "SELL"):
-                            active_signals = get_open_signals()
-                            same_dir_signals = [s for s in active_signals if s.get("symbol") == sym and s["direction"] == action]
+                            pyramid_ok, pyramid_msg = check_pyramiding_allowed(sym, action, close_p, atr_val)
+                            if not pyramid_ok:
+                                logger.info(f"[{sym}] Сигнал {action} отклонен: {pyramid_msg}")
+                                outcome_label = "⏳ Усреднение запрещено"
+                                action = "HOLD"
+                            else:
+                                logger.info(f"[{sym}] {pyramid_msg}")
 
-                            allow_signal = True
-                            cooldown_min = profile.get("cooldown_minutes", 45)
+                                # Проверка кулдауна с корректным учетом часовых поясов
+                                active_signals = get_open_signals()
+                                same_dir_signals = [s for s in active_signals if s.get("symbol") == sym and s["direction"] == action]
+                                allow_signal = True
 
-                            if same_dir_signals:
-                                last_sig = same_dir_signals[-1]
-                                try:
-                                    last_dt = datetime.fromisoformat(last_sig["created_at"])
-                                    sig_age_min = (now_utc - last_dt).total_seconds() / 60.0
-                                    if sig_age_min < cooldown_min:
-                                        logger.info(f"[{sym}] Сигнал {action} пропущен: пауза {cooldown_min} мин еще не прошла ({sig_age_min:.0f} мин).")
-                                        allow_signal = False
-                                        outcome_label = f"⏳ Пауза сделки #{last_sig['id']}"
-                                except Exception:
-                                    pass
-
-                            if allow_signal:
-                                levels = calculate_risk_levels(action, close_p, atr_val, symbol=sym)
-                                session_name = get_current_trading_session_name(now_utc)
-
-                                # Собираем исчерпывающие диагностические данные для детального анализа сделки
-                                try:
-                                    from zoneinfo import ZoneInfo
-                                    local_dt = now_utc.astimezone(ZoneInfo("Europe/Chisinau"))
-                                    local_time_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
-                                    is_after_17 = local_dt.hour >= 17
-                                except Exception:
-                                    local_time_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-                                    is_after_17 = False
-
-                                diagnostic_payload = {
-                                    "symbol": sym,
-                                    "direction": action,
-                                    "created_at_utc": now_utc.isoformat(),
-                                    "created_at_local": local_time_str,
-                                    "is_after_17_chisinau": is_after_17,
-                                    "session_name": session_name,
-                                    "category": profile.get("category", ""),
-                                    "prices": {
-                                        "open": float(latest_candle.get("open", close_p)),
-                                        "high": float(latest_candle.get("high", close_p)),
-                                        "low": float(latest_candle.get("low", close_p)),
-                                        "close": float(close_p),
-                                        "volume": float(latest_candle.get("volume", 0.0))
-                                    },
-                                    "indicators": {
-                                        "rsi": float(latest_candle.get("rsi", 50.0)),
-                                        "atr": float(atr_val),
-                                        "atr_pct": float(latest_candle.get("atr_pct", 0.0)),
-                                        "adx": float(adx_val),
-                                        "plus_di": float(latest_candle.get("plus_di", 0.0)),
-                                        "minus_di": float(latest_candle.get("minus_di", 0.0)),
-                                        "macd": float(latest_candle.get("macd", 0.0)),
-                                        "macd_hist": float(latest_candle.get("macd_hist", 0.0)),
-                                        "ema_21": float(latest_candle.get("ema_21", close_p)),
-                                        "ema_50": float(latest_candle.get("ema_50", close_p)),
-                                        "ema_200": float(latest_candle.get("ema_200", close_p)),
-                                        "dist_ema_200": float(latest_candle.get("dist_ema_200", 0.0)),
-                                        "ema_trend": float(latest_candle.get("ema_trend", 0.0)),
-                                        "return_1": float(latest_candle.get("return_1", 0.0)),
-                                        "return_3": float(latest_candle.get("return_3", 0.0)),
-                                        "return_5": float(latest_candle.get("return_5", 0.0)),
-                                    },
-                                    "ml_prediction": prediction.get("diagnostics", {}),
-                                    "ml_action": action,
-                                    "ml_probability": float(prob),
-                                    "ml_reason": reason,
-                                    "news": {
-                                        "shield_active": bool(news_info.get("shield_active", False)),
-                                        "shield_reason": str(news_info.get("shield_reason", "")),
-                                        "score": float(news_info.get("score", 0.0)),
-                                        "label": str(news_info.get("label", "Neutral")),
-                                        "top_headline": str(news_info.get("top_headline", "")),
-                                        "source": str(news_info.get("source", ""))
-                                    },
-                                    "risk": {
-                                        "entry_price": float(levels["entry_price"]),
-                                        "take_profit": float(levels["take_profit"]),
-                                        "stop_loss": float(levels["stop_loss"]),
-                                        "risk_reward_ratio": str(levels.get("risk_reward_ratio", "1:1.33")),
-                                        "recommended_lot": float(levels.get("recommended_lot", 0.01)),
-                                        "sl_distance": float(levels.get("sl_distance", 0.0)),
-                                        "tp_distance": float(levels.get("tp_distance", 0.0))
-                                    },
-                                    "asset_profile": {
-                                        "min_adx": profile.get("min_adx"),
-                                        "min_probability": profile.get("min_probability")
-                                    }
-                                }
-
-                                # Сохранение в базу данных с расширенным диагностическим пакетом
-                                sig_id = save_signal(
-                                    symbol=sym,
-                                    direction=action,
-                                    entry_price=levels["entry_price"],
-                                    take_profit=levels["take_profit"],
-                                    stop_loss=levels["stop_loss"],
-                                    atr=levels["atr"],
-                                    probability=prob,
-                                    diagnostic_data=diagnostic_payload
-                                )
-
-                                logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} @ {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
-                                outcome_label = f"✅ Сигнал #{sig_id} {action}"
-
-                                # Отправка в Telegram с полным контекстом
-                                sent_msg_id = notifier.send_trade_signal(
-                                    signal_id=sig_id,
-                                    symbol=sym,
-                                    direction=action,
-                                    entry_price=levels["entry_price"],
-                                    stop_loss=levels["stop_loss"],
-                                    take_profit=levels["take_profit"],
-                                    probability=prob,
-                                    atr=levels["atr"],
-                                    risk_reward=levels["risk_reward_ratio"],
-                                    session_name=session_name,
-                                    recommended_lot=levels.get("recommended_lot", 0.01),
-                                    news_sentiment=news_info["label"],
-                                    headline=news_info["top_headline"],
-                                    adx=adx_val,
-                                    asset_category=profile.get("category", "")
-                                )
-                                if sent_msg_id and sig_id:
+                                if same_dir_signals:
+                                    last_sig = same_dir_signals[-1]
                                     try:
-                                        set_signal_message_id(sig_id, sent_msg_id)
-                                    except Exception as e:
-                                        logger.warning(f"Не удалось связать message_id с сигналом #{sig_id}: {e}")
+                                        last_dt = datetime.fromisoformat(last_sig["created_at"])
+                                        if last_dt.tzinfo is None:
+                                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                                        sig_age_min = (now_utc - last_dt).total_seconds() / 60.0
+                                        # При пирамидинге (доливке в прибыль) пауза между сделками 10 мин
+                                        pyramid_cd = 10.0
+                                        if sig_age_min < pyramid_cd:
+                                            logger.info(f"[{sym}] Пауза доливки: прошло {sig_age_min:.0f} из {pyramid_cd:.0f} мин.")
+                                            allow_signal = False
+                                            outcome_label = f"⏳ Пауза доливки #{last_sig['id']}"
+                                    except Exception as ex_dt:
+                                        logger.warning(f"Ошибка проверки времени кулдауна: {ex_dt}")
+
+                                if allow_signal:
+                                    logger.info(f"[{sym}] {pyramid_msg}")
+                                    levels = calculate_risk_levels(action, close_p, atr_val, symbol=sym)
+                                    session_name = get_current_trading_session_name(now_utc)
+
+                                    # Собираем исчерпывающие диагностические данные для детального анализа сделки
+                                    try:
+                                        from zoneinfo import ZoneInfo
+                                        local_dt = now_utc.astimezone(ZoneInfo("Europe/Chisinau"))
+                                        local_time_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+                                        is_after_17 = local_dt.hour >= 17
+                                    except Exception:
+                                        local_time_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                                        is_after_17 = False
+
+                                    diagnostic_payload = {
+                                        "symbol": sym,
+                                        "direction": action,
+                                        "created_at_utc": now_utc.isoformat(),
+                                        "created_at_local": local_time_str,
+                                        "is_after_17_chisinau": is_after_17,
+                                        "session_name": session_name,
+                                        "category": profile.get("category", ""),
+                                        "market_regime": regime_info.get("regime", "RANGE_FLAT"),
+                                        "pyramiding_info": pyramid_msg,
+                                        "prices": {
+                                            "open": float(latest_candle.get("open", close_p)),
+                                            "high": float(latest_candle.get("high", close_p)),
+                                            "low": float(latest_candle.get("low", close_p)),
+                                            "close": float(close_p),
+                                            "volume": float(latest_candle.get("volume", 0.0))
+                                        },
+                                        "indicators": {
+                                            "rsi": float(latest_candle.get("rsi", 50.0)),
+                                            "atr": float(atr_val),
+                                            "atr_pct": float(latest_candle.get("atr_pct", 0.0)),
+                                            "adx": float(adx_val),
+                                            "plus_di": float(latest_candle.get("plus_di", 0.0)),
+                                            "minus_di": float(latest_candle.get("minus_di", 0.0)),
+                                            "macd": float(latest_candle.get("macd", 0.0)),
+                                            "macd_hist": float(latest_candle.get("macd_hist", 0.0)),
+                                            "ema_21": float(latest_candle.get("ema_21", close_p)),
+                                            "ema_50": float(latest_candle.get("ema_50", close_p)),
+                                            "ema_200": float(latest_candle.get("ema_200", close_p)),
+                                            "dist_ema_200": float(latest_candle.get("dist_ema_200", 0.0)),
+                                            "ema_trend": float(latest_candle.get("ema_trend", 0.0)),
+                                            "htf_trend": float(latest_candle.get("htf_trend", 0.0)),
+                                            "return_1": float(latest_candle.get("return_1", 0.0)),
+                                            "return_3": float(latest_candle.get("return_3", 0.0)),
+                                            "return_5": float(latest_candle.get("return_5", 0.0)),
+                                        },
+                                        "ml_prediction": prediction.get("diagnostics", {}),
+                                        "ml_action": action,
+                                        "ml_probability": float(prob),
+                                        "ml_reason": reason,
+                                        "news": {
+                                            "shield_active": bool(news_info.get("shield_active", False)),
+                                            "shield_reason": str(news_info.get("shield_reason", "")),
+                                            "score": float(news_info.get("score", 0.0)),
+                                            "label": str(news_info.get("label", "Neutral")),
+                                            "top_headline": str(news_info.get("top_headline", "")),
+                                            "source": str(news_info.get("source", ""))
+                                        },
+                                        "risk": {
+                                            "entry_price": float(levels["entry_price"]),
+                                            "take_profit": float(levels["take_profit"]),
+                                            "stop_loss": float(levels["stop_loss"]),
+                                            "risk_reward_ratio": str(levels.get("risk_reward_ratio", "1:1.33")),
+                                            "recommended_lot": float(levels.get("recommended_lot", 0.01)),
+                                            "sl_distance": float(levels.get("sl_distance", 0.0)),
+                                            "tp_distance": float(levels.get("tp_distance", 0.0))
+                                        },
+                                        "asset_profile": {
+                                            "min_adx": profile.get("min_adx"),
+                                            "min_probability": profile.get("min_probability")
+                                        }
+                                    }
+
+                                    # Сохранение в базу данных с расширенным диагностическим пакетом
+                                    sig_id = save_signal(
+                                        symbol=sym,
+                                        direction=action,
+                                        entry_price=levels["entry_price"],
+                                        take_profit=levels["take_profit"],
+                                        stop_loss=levels["stop_loss"],
+                                        atr=levels["atr"],
+                                        probability=prob,
+                                        diagnostic_data=diagnostic_payload
+                                    )
+
+                                    logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} @ {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
+                                    outcome_label = f"✅ Сигнал #{sig_id} {action}"
+
+                                    # Отправка в Telegram с полным контекстом
+                                    sent_msg_id = notifier.send_trade_signal(
+                                        signal_id=sig_id,
+                                        symbol=sym,
+                                        direction=action,
+                                        entry_price=levels["entry_price"],
+                                        stop_loss=levels["stop_loss"],
+                                        take_profit=levels["take_profit"],
+                                        probability=prob,
+                                        atr=levels["atr"],
+                                        risk_reward=levels["risk_reward_ratio"],
+                                        session_name=session_name,
+                                        recommended_lot=levels.get("recommended_lot", 0.01),
+                                        news_sentiment=news_info["label"],
+                                        headline=news_info["top_headline"],
+                                        adx=adx_val,
+                                        asset_category=profile.get("category", "")
+                                    )
+                                    if sent_msg_id and sig_id:
+                                        try:
+                                            set_signal_message_id(sig_id, sent_msg_id)
+                                        except Exception as e:
+                                            logger.warning(f"Не удалось связать message_id с сигналом #{sig_id}: {e}")
 
                         # Записываем в журнал анализов для кнопки "📊 Статус Бота"
                         log_candle_analysis(sym, close_p, action, prob, outcome_label, reason)

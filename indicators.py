@@ -36,13 +36,14 @@ def calculate_indicators(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame
     data["ema_50"] = close.ewm(span=50, adjust=False).mean()
     data["ema_200"] = close.ewm(span=200, adjust=False).mean()
 
-    # 2. Индекс относительной силы RSI 14 (Wilder's RSI)
+    # 2. Индекс относительной силы RSI 14 (Wilder's RSI) и его дельта (Hook)
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, np.nan)
     data["rsi"] = 100 - (100 / (1 + rs))
     data["rsi"] = data["rsi"].fillna(50)
+    data["rsi_diff"] = data["rsi"].diff().fillna(0.0)
 
     # 3. Средний истинный диапазон ATR 14
     prev_close = close.shift(1)
@@ -97,9 +98,23 @@ def calculate_indicators(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame
     if "ema_9" in data.columns and "ema_21" in data.columns:
         data["ema_trend"] = (data["ema_9"] - data["ema_21"]) / data["close"] * 100
 
-    # Импульс (Momentum) за последние 1, 3, 5 свечей
+    # 6. Импульс (Momentum) за последние 1, 3, 5 свечей
     data["return_1"] = data["close"].pct_change(1) * 100
     data["return_3"] = data["close"].pct_change(3) * 100
     data["return_5"] = data["close"].pct_change(5) * 100
+
+    # 7. Старший таймфрейм (Higher Timeframe Proxy H1/H4 из 5m свечей)
+    # 12 свечей = 1 час. 48 свечей = 4 часа. 144 свечи = 12 часов.
+    htf_fast = close.ewm(span=48, adjust=False).mean()
+    htf_slow = close.ewm(span=144, adjust=False).mean()
+    data["htf_trend"] = np.where(htf_fast > htf_slow, 1.0, -1.0)
+    data["htf_bias"] = (htf_fast - htf_slow) / close * 100
+
+    # 8. Индикатор режима рынка (Market Regime)
+    # ADX > 25 = ТРЕНД, ADX <= 25 = ФЛЭТ
+    is_trend = data["adx"] > 25.0
+    bull_regime = is_trend & (data["plus_di"] > data["minus_di"])
+    bear_regime = is_trend & (data["minus_di"] > data["plus_di"])
+    data["regime_code"] = np.select([bull_regime, bear_regime], [1.0, -1.0], default=0.0)
 
     return data

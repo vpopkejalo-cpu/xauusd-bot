@@ -22,6 +22,7 @@ import pandas as pd
 
 from config import (
     DEMO_MODE,
+    MAX_PYRAMID_POSITIONS,
     FILTER_ASIAN_SESSION,
     ASIAN_SESSION_START_HOUR,
     ASIAN_SESSION_END_HOUR,
@@ -277,6 +278,123 @@ def evaluate_kill_switch(daily_stats: Dict[str, Any]) -> Tuple[bool, str]:
         return True, f"Дневной убыток ({net_pnl:.1f} п.) превысил допустимый порог ({KILL_SWITCH_MAX_DAILY_LOSS} п.)."
 
     return False, ""
+
+
+def detect_market_regime(candle: pd.Series) -> Dict[str, Any]:
+    """
+    Market Regime Engine: определяет текущий режим рынка (тренд vs флэт).
+    - BULL_TREND: ADX > 25 и +DI > -DI (строго запрещены продажи)
+    - BEAR_TREND: ADX > 25 и -DI > +DI (строго запрещены покупки!)
+    - RANGE_FLAT: ADX <= 25 (боковой рынок / флэт)
+    """
+    adx = float(candle.get("adx", 20.0))
+    plus_di = float(candle.get("plus_di", 20.0))
+    minus_di = float(candle.get("minus_di", 20.0))
+
+    if adx > 25.0:
+        if plus_di > minus_di + 2.0:
+            return {
+                "regime": "BULL_TREND",
+                "trend_dir": "BUY",
+                "adx": adx,
+                "description": f"Сильный восходящий тренд (ADX={adx:.1f}, +DI={plus_di:.1f} > -DI={minus_di:.1f})",
+                "allow_buy": True,
+                "allow_sell": False
+            }
+        elif minus_di > plus_di + 2.0:
+            return {
+                "regime": "BEAR_TREND",
+                "trend_dir": "SELL",
+                "adx": adx,
+                "description": f"Сильный нисходящий тренд (ADX={adx:.1f}, -DI={minus_di:.1f} > +DI={plus_di:.1f})",
+                "allow_buy": False,
+                "allow_sell": True
+            }
+
+    return {
+        "regime": "RANGE_FLAT",
+        "trend_dir": "NEUTRAL",
+        "adx": adx,
+        "description": f"Умеренная волатильность / боковик (ADX={adx:.1f})",
+        "allow_buy": True,
+        "allow_sell": True
+    }
+
+
+def check_pyramiding_allowed(
+    symbol: str,
+    action: str,
+    current_price: float,
+    atr_val: float,
+    max_positions: int = MAX_PYRAMID_POSITIONS
+) -> Tuple[bool, str]:
+    """
+    Pyramiding Engine: Разрешает множественные сделки (доливку в тренд),
+    ТОЛЬКО если предыдущая позиция УЖЕ В ПРИБЫЛИ.
+    Категорически запрещает усреднение в убыток (Martingale).
+    """
+    from database import get_open_signals
+    active_sigs = [s for s in get_open_signals() if s.get("symbol") == symbol]
+
+    if not active_sigs:
+        return True, "Первая позиция по активу"
+
+    # Проверяем нет ли позиции в обратную сторону
+    opp_sigs = [s for s in active_sigs if s.get("direction") != action]
+    if opp_sigs:
+        return False, f"Запрет: есть открытая противоположная сделка #{opp_sigs[0]['id']} ({opp_sigs[0]['direction']})"
+
+    # Проверяем лимит пирамидинга
+    same_dir_sigs = [s for s in active_sigs if s.get("direction") == action]
+    if len(same_dir_sigs) >= max_positions:
+        return False, f"Достигнут максимальный лимит пирамидинга ({len(same_dir_sigs)}/{max_positions} позиций)"
+
+    # Проверяем прибыль последней открытой сделки
+    last_sig = same_dir_sigs[-1]
+    entry = float(last_sig["entry_price"])
+    min_profit_dist = max(0.2 * atr_val, 0.0001)
+
+    if action == "BUY":
+        if current_price >= entry + min_profit_dist:
+            profit_pts = current_price - entry
+            return True, f"🚀 Доливка в прибыль (Pyramiding #{len(same_dir_sigs)+1}): прошлая позиция #{last_sig['id']} в плюсе (+{profit_pts:.2f} п.)"
+        else:
+            return False, f"⏳ Усреднение в убыток запрещено: прошлая покупка #{last_sig['id']} по {entry:.2f} в минусе или без профита (тек: {current_price:.2f})"
+
+    elif action == "SELL":
+        if current_price <= entry - min_profit_dist:
+            profit_pts = entry - current_price
+            return True, f"🚀 Доливка в прибыль (Pyramiding #{len(same_dir_sigs)+1}): прошлая позиция #{last_sig['id']} в плюсе (+{profit_pts:.2f} п.)"
+        else:
+            return False, f"⏳ Усреднение в убыток запрещено: прошлая продажа #{last_sig['id']} по {entry:.2f} в минусе или без профита (тек: {current_price:.2f})"
+
+    return False, "Неизвестное направление"
+
+
+def check_symbol_consecutive_losses(symbol: str, cooldown_minutes: int = 90) -> Tuple[bool, str]:
+    """
+    Защита от серийных стоп-лоссов по конкретному активу.
+    Если инструмент получил 2 стопа подряд за последние 90 минут — даем рынку остыть.
+    """
+    from database import get_signals_for_report
+    recent = [s for s in get_signals_for_report(days=1, limit=50) if s.get("symbol") == symbol and s.get("status") in ("TP_HIT", "SL_HIT")]
+
+    if len(recent) >= 2:
+        last_two = recent[-2:]
+        if all(s.get("status") == "SL_HIT" for s in last_two):
+            last_sl_time_str = last_two[-1].get("closed_at") or last_two[-1].get("created_at")
+            if last_sl_time_str:
+                try:
+                    last_sl_dt = datetime.fromisoformat(last_sl_time_str)
+                    if last_sl_dt.tzinfo is None:
+                        last_sl_dt = last_sl_dt.replace(tzinfo=timezone.utc)
+                    elapsed = (datetime.now(timezone.utc) - last_sl_dt).total_seconds() / 60.0
+                    if elapsed < cooldown_minutes:
+                        return False, f"[{symbol}] Активирован защитный тайм-аут после 2 стопов подряд (прошло {elapsed:.0f}/{cooldown_minutes} мин). Остывание рынка."
+                except Exception:
+                    pass
+
+    return True, "OK"
 
 
 def calculate_risk_levels(

@@ -83,7 +83,8 @@ def get_main_keyboard(is_paused: bool = False) -> Dict:
         "keyboard": [
             [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
             [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
-            [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}]
+            [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}],
+            [{"text": "🤖 Разбор ИИ"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
@@ -878,6 +879,14 @@ class TelegramNotifier:
                         filename=report_data["csv_filename"],
                         caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
                     )
+
+                # Автоматически отправляем рецензию AI-Аналитика
+                try:
+                    from ai_analyst import generate_ai_session_analysis
+                    ai_review = generate_ai_session_analysis(days=1)
+                    self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_paused=True))
+                except Exception as e_ai:
+                    logger.warning(f"Не удалось сформировать AI разбор при паузе: {e_ai}")
             except Exception as e:
                 logger.error(f"Не удалось сформировать или отправить диагностический отчет при паузе: {e}", exc_info=True)
 
@@ -943,9 +952,28 @@ class TelegramNotifier:
                         filename=report_data["csv_filename"],
                         caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
                     )
+
+                # Автоматически отправляем рецензию AI-Аналитика
+                try:
+                    from ai_analyst import generate_ai_session_analysis
+                    ai_review = generate_ai_session_analysis(days=1)
+                    self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_bot_paused()))
+                except Exception as e_ai:
+                    logger.warning(f"Не удалось сформировать AI разбор при запросе логов: {e_ai}")
             except Exception as e:
                 logger.error(f"Ошибка при формировании диагностического отчета по запросу: {e}", exc_info=True)
                 self.send_raw_message(f"❌ <b>Ошибка генерации отчета:</b> {e}", reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 9. Кнопка "🤖 Разбор ИИ" / /ai
+        elif "разбор" in lower_text or "ии" in lower_text or lower_text in ("/ai", "ai", "analyst"):
+            try:
+                self.send_raw_message("🧠 <i>AI-Аналитик изучает паттерны последних сделок, веса модели и поведение рынка... Пожалуйста, подождите.</i>", reply_markup=get_main_keyboard(is_bot_paused()))
+                from ai_analyst import generate_ai_session_analysis
+                ai_review = generate_ai_session_analysis(days=1)
+                self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_bot_paused()))
+            except Exception as e_ai:
+                logger.error(f"Ошибка при вызове AI-Аналитика: {e_ai}", exc_info=True)
+                self.send_raw_message(f"❌ <b>Ошибка формирования AI разбора:</b> {e_ai}", reply_markup=get_main_keyboard(is_bot_paused()))
 
         else:
             # Неизвестная команда — просто возвращаем кнопки меню

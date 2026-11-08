@@ -146,7 +146,12 @@ def test_system():
     print("Kill Switch успешно сброшен и разблокирован.")
 
     print(">>> 7. Тест жизненного цикла торгового сигнала и винрейта за Сегодня...")
-    sig_id = save_signal("XAU/USD", "BUY", entry_price, risk_gold["take_profit"], risk_gold["stop_loss"], atr_val, 0.65)
+    diag_data = {
+        "ml_prediction": pred["diagnostics"],
+        "risk": risk_gold,
+        "market_context": {"rsi": 66.2, "adx": 26.5, "plus_di": 23.3, "minus_di": 21.0}
+    }
+    sig_id = save_signal("XAU/USD", "BUY", entry_price, risk_gold["take_profit"], risk_gold["stop_loss"], atr_val, 0.65, diagnostic_data=diag_data)
     open_sigs = get_open_signals()
     assert any(s["id"] == sig_id for s in open_sigs), "Сигнал не найден среди открытых"
     update_signal_status(sig_id, "TP_HIT", risk_gold["take_profit"], risk_gold["take_profit"] - entry_price)
@@ -167,6 +172,40 @@ def test_system():
     assert "ТАБЛИЦА ВЕСОВ" in rep["txt_content"] or "ДЕТАЛИЗАЦИЯ ВЕСОВ" in rep["txt_content"] or "ДЕЙСТВИЕ" in rep["txt_content"], "В отчете должен быть блок весов модели"
     assert "csv_content" in rep and len(rep["csv_content"]) > 0, "CSV отчет не должен быть пустым"
     print(f"Диагностический отчет успешно сгенерирован: сигналов={rep['signals_count']}, TXT={len(rep['txt_content'])} байт, CSV={len(rep['csv_content'])} байт")
+
+    print(">>> 9. Тест Рыночных Режимов, Пирамидинга и AI-Аналитика...")
+    from risk_manager import (
+        detect_market_regime,
+        check_pyramiding_allowed,
+        check_symbol_consecutive_losses
+    )
+    from ai_analyst import generate_ai_session_analysis
+
+    # Проверка новых индикаторов: rsi_diff, htf_trend, regime_code
+    assert "rsi_diff" in df_ind.columns, "rsi_diff отсутствует в индикаторах"
+    assert "htf_trend" in df_ind.columns, "htf_trend отсутствует в индикаторах"
+    assert "regime_code" in df_ind.columns, "regime_code отсутствует в индикаторах"
+
+    # Проверка детектора режимов
+    sample_candle = df_ind.iloc[-1]
+    regime_res = detect_market_regime(sample_candle)
+    assert "regime" in regime_res and "allow_buy" in regime_res, "detect_market_regime вернул некорректный ответ"
+    print(f"Детектор режимов: {regime_res['regime']} (BUY={regime_res['allow_buy']}, SELL={regime_res['allow_sell']})")
+
+    # Проверка проверки пирамидинга
+    pyr_allowed, pyr_reason = check_pyramiding_allowed("XAU/USD", "BUY", entry_price, atr_val, max_positions=3)
+    assert isinstance(pyr_allowed, bool), "check_pyramiding_allowed должен вернуть boolean статус"
+    print(f"Проверка пирамидинга: allowed={pyr_allowed}, reason='{pyr_reason}'")
+
+    # Проверка заморозки после серии стопов
+    is_cooling, cool_reason = check_symbol_consecutive_losses("XAU/USD", cooldown_minutes=90)
+    assert isinstance(is_cooling, bool), "check_symbol_consecutive_losses должен вернуть boolean статус"
+    print(f"Проверка серии стопов: cooling={is_cooling}, reason='{cool_reason}'")
+
+    # Проверка запуска AI-Аналитика (локальный аудит или Gemini)
+    ai_report = generate_ai_session_analysis(days=1)
+    assert "AI-АНАЛИТИК" in ai_report or "РЕЦЕНЗИЯ" in ai_report, "AI-аналитик не сформировал отчет"
+    print(f"AI-Аналитик успешно сформировал рецензию ({len(ai_report)} символов).")
 
     print("\n==============================================================")
     print("✅ ВСЕ МОДУЛИ, ИНДИВИДУАЛЬНЫЕ ПРОФИЛИ И ЗАЩИТА УСПЕШНО ПРОШЛИ ТЕСТ!")

@@ -87,6 +87,14 @@ MODEL_PATH = BASE_DIR / "ml_model.joblib"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Настройки AI-Аналитика (AI Mentor) через Gemini API (Google AI Studio)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip()
+AI_ANALYST_ENABLED = os.getenv("AI_ANALYST_ENABLED", "true").lower() in ("true", "1", "yes")
+
+# Параметры доливки в прибыль (Pyramiding):
+# Разрешено держать до N прибыльных позиций по одному активу одновременно
+MAX_PYRAMID_POSITIONS = int(os.getenv("MAX_PYRAMID_POSITIONS", "3"))
+
 # Режим работы бота: DEMO_MODE = True гарантирует непрерывную работу, анализ свечей и сбор опыта
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")
 
