@@ -207,6 +207,14 @@ def test_system():
     assert "AI-АНАЛИТИК" in ai_report or "РЕЦЕНЗИЯ" in ai_report, "AI-аналитик не сформировал отчет"
     print(f"AI-Аналитик успешно сформировал рецензию ({len(ai_report)} символов).")
 
+    print(">>> 10. Тест модуля экспресс-проверки всех систем (System Health Check)...")
+    from system_checker import run_full_system_check
+    diag = run_full_system_check()
+    assert "ДИАГНОСТИЧЕСКАЯ ПАНЕЛЬ" in diag["report_text"], "Диагностический отчет не сформирован"
+    assert "api_results" in diag and "ml_results" in diag, "Словарь диагностики не полон"
+    print(f"Диагностика систем успешно завершена за {diag['elapsed_seconds']} с:")
+    print(f"API проверено: {len(diag['api_results'])}, Моделей проанализировано: {len(diag['ml_results'])}")
+
     print("\n==============================================================")
     print("✅ ВСЕ МОДУЛИ, ИНДИВИДУАЛЬНЫЕ ПРОФИЛИ И ЗАЩИТА УСПЕШНО ПРОШЛИ ТЕСТ!")
     print("==============================================================")

@@ -84,7 +84,7 @@ def get_main_keyboard(is_paused: bool = False) -> Dict:
             [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
             [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
             [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}],
-            [{"text": "🤖 Разбор ИИ"}]
+            [{"text": "🤖 Разбор ИИ"}, {"text": "🩺 Проверка систем"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
@@ -272,7 +272,9 @@ class TelegramNotifier:
             "• <b>📊 Статус Бота</b> — текущие цены, последние 5 анализов и открытые сделки\n"
             "• <b>📈 Винрейт</b> — статистика винрейта за день, неделю, месяц, год\n"
             "• <b>⏸ Поставить на паузу</b> — выключайте бота на ночь для экономии ресурсов\n"
-            "• <b>🧹 Сброс сделок</b> — мгновенная очистка зависших позиций"
+            "• <b>🧹 Сброс сделок</b> — мгновенная очистка зависших позиций\n"
+            "• <b>🤖 Разбор ИИ</b> — разбор сессии и рецензия AI-Ментора\n"
+            "• <b>🩺 Проверка систем</b> — экспресс-тест всех API, весов ML и базы данных"
         )
         return self.send_raw_message(message, reply_markup=get_main_keyboard(paused))
 
@@ -974,6 +976,17 @@ class TelegramNotifier:
             except Exception as e_ai:
                 logger.error(f"Ошибка при вызове AI-Аналитика: {e_ai}", exc_info=True)
                 self.send_raw_message(f"❌ <b>Ошибка формирования AI разбора:</b> {e_ai}", reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 10. Кнопка "🩺 Проверка систем" / /check / /health / /test
+        elif "провер" in lower_text or "диагност" in lower_text or "систем" in lower_text or "тест" in lower_text or lower_text in ("/check", "check", "/health", "health", "/test", "test", "/diag"):
+            try:
+                self.send_raw_message("🩺 <i>Запуск экспресс-теста всех систем, API и весов ML-модели...</i>", reply_markup=get_main_keyboard(is_bot_paused()))
+                from system_checker import run_full_system_check
+                diag = run_full_system_check()
+                self.send_raw_message(diag["report_text"], reply_markup=get_main_keyboard(is_bot_paused()))
+            except Exception as e_diag:
+                logger.error(f"Ошибка при проверке систем: {e_diag}", exc_info=True)
+                self.send_raw_message(f"❌ <b>Ошибка диагностики систем:</b> {e_diag}", reply_markup=get_main_keyboard(is_bot_paused()))
 
         else:
             # Неизвестная команда — просто возвращаем кнопки меню
