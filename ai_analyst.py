@@ -10,7 +10,14 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from config import GEMINI_API_KEY, AI_ANALYST_ENABLED
+from config import (
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
+    GEMINI_API_KEY,
+    AI_ANALYST_ENABLED
+)
 from database import get_signals_for_report
 
 logger = logging.getLogger(__name__)
@@ -121,27 +128,108 @@ def _build_rule_based_analysis(signals: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_MENTOR_SYSTEM_PROMPT = (
+    "Ты — опытный количественный трейдер и шеф по рискам хедж-фонда (AI Trading Mentor). "
+    "Изучи сводку сделок нашего торгового бота и дай краткую, конкретную и полезную рецензию (до 250 слов):\n"
+    "1. В чем главная причина ошибок (если они есть)?\n"
+    "2. Что сделано правильно?\n"
+    "3. Топ-2 конкретные рекомендации для увеличения прибыли завтра.\n\n"
+    "Отвечай на русском языке, используй лаконичный профессиональный тон и эмодзи."
+)
+
+
+def _call_groq_api(signals_summary_text: str) -> Optional[str]:
+    """
+    Отправляет сводку в Groq Cloud API (100% бесплатный тариф без кредитных карт).
+    Использует сверхбыстрые модели Llama 3.3 70B Versatile или DeepSeek R1.
+    """
+    if not GROQ_API_KEY:
+        return None
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": _MENTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": f"ДАННЫЕ ТОРГОВОЙ СЕССИИ:\n{signals_summary_text}"}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 650
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+                if text:
+                    return text.strip()
+        else:
+            logger.warning(f"Ошибка вызова Groq API: HTTP {resp.status_code} — {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Сбой при обращении к Groq API: {e}")
+
+    return None
+
+
+def _call_openrouter_api(signals_summary_text: str) -> Optional[str]:
+    """
+    Отправляет сводку в OpenRouter API (бесплатные модели с суффиксом :free).
+    """
+    if not OPENROUTER_API_KEY:
+        return None
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/trading-bot",
+        "X-Title": "TradingBot AI Mentor"
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": _MENTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": f"ДАННЫЕ ТОРГОВОЙ СЕССИИ:\n{signals_summary_text}"}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 650
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+                if text:
+                    return text.strip()
+        else:
+            logger.warning(f"Ошибка вызова OpenRouter API: HTTP {resp.status_code} — {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Сбой при обращении к OpenRouter API: {e}")
+
+    return None
+
+
 def _call_gemini_api(signals_summary_text: str) -> Optional[str]:
     """
-    Отправляет краткую сводку сессии в Google Gemini API (gemini-1.5-flash) для генерации экспертной рецензии.
+    Отправляет сводку в Google Gemini API (gemini-1.5-flash).
     """
     if not GEMINI_API_KEY:
         return None
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    prompt = (
-        "Ты — опытный количественный трейдер и шеф по рискам хедж-фонда (AI Trading Mentor). "
-        "Изучи сводку сделок нашего торгового бота и дай краткую, конкретную и полезную рецензию (до 250 слов):\n"
-        "1. В чем главная причина ошибок (если они есть)?\n"
-        "2. Что сделано правильно?\n"
-        "3. Топ-2 конкретные рекомендации для увеличения прибыли завтра.\n\n"
-        f"ДАННЫЕ СЕССИИ:\n{signals_summary_text}\n\n"
-        "Отвечай на русском языке, используй лаконичный профессиональный тон и эмодзи."
-    )
-
     payload = {
         "contents": [{
-            "parts": [{"text": prompt}]
+            "parts": [{"text": f"{_MENTOR_SYSTEM_PROMPT}\n\nДАННЫЕ ТОРГОВОЙ СЕССИИ:\n{signals_summary_text}"}]
         }],
         "generationConfig": {
             "temperature": 0.3,
@@ -169,7 +257,11 @@ def _call_gemini_api(signals_summary_text: str) -> Optional[str]:
 def generate_ai_session_analysis(days: int = 1) -> str:
     """
     Основная точка входа:
-    Генерирует анализ с помощью Gemini (если ключ задан), либо через встроенный количественный движок.
+    Генерирует анализ с помощью доступного бесплатного AI-провайдера:
+    1. Groq (Llama 3.3 70B / DeepSeek R1 — 100% бесплатно, без карт)
+    2. OpenRouter (:free модели)
+    3. Google Gemini 1.5 Flash
+    4. Автономный количественный аудитор (резерв)
     """
     signals = get_signals_for_report(days=days, limit=60)
     rule_analysis = _build_rule_based_analysis(signals)
@@ -177,12 +269,41 @@ def generate_ai_session_analysis(days: int = 1) -> str:
     if not AI_ANALYST_ENABLED:
         return rule_analysis
 
-    # Если задан GEMINI_API_KEY, пробуем дополнить нейросетевым рецензированием
+    # 1. Приоритетный бесплатный провайдер: Groq
+    if GROQ_API_KEY:
+        try:
+            groq_review = _call_groq_api(rule_analysis)
+            if groq_review:
+                model_name = GROQ_MODEL.upper()
+                return (
+                    f"🧠 <b>РЕЦЕНЗИЯ AI-МЕНТОРА (GROQ / {model_name}):</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"{groq_review}\n\n"
+                    "📊 <b>КОЛИЧЕСТВЕННАЯ СВОДКА СЕССИИ:</b>\n"
+                    f"{rule_analysis}"
+                )
+        except Exception as e:
+            logger.error(f"Не удалось получить ответ Groq: {e}")
+
+    # 2. Второй бесплатный провайдер: OpenRouter
+    if OPENROUTER_API_KEY:
+        try:
+            or_review = _call_openrouter_api(rule_analysis)
+            if or_review:
+                return (
+                    "🧠 <b>РЕЦЕНЗИЯ AI-МЕНТОРА (OPENROUTER / FREE):</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"{or_review}\n\n"
+                    "📊 <b>КОЛИЧЕСТВЕННАЯ СВОДКА СЕССИИ:</b>\n"
+                    f"{rule_analysis}"
+                )
+        except Exception as e:
+            logger.error(f"Не удалось получить ответ OpenRouter: {e}")
+
+    # 3. Резервный провайдер: Google Gemini
     if GEMINI_API_KEY:
         try:
-            # Готовим краткую выжимку для промпта
-            summary_for_llm = rule_analysis
-            gemini_review = _call_gemini_api(summary_for_llm)
+            gemini_review = _call_gemini_api(rule_analysis)
             if gemini_review:
                 return (
                     "🧠 <b>РЕЦЕНЗИЯ AI-МЕНТОРА (GEMINI 1.5 FLASH):</b>\n"
@@ -194,5 +315,6 @@ def generate_ai_session_analysis(days: int = 1) -> str:
         except Exception as e:
             logger.error(f"Не удалось получить ответ Gemini: {e}")
 
+    # 4. Автономный количественный аудитор
     return rule_analysis
 

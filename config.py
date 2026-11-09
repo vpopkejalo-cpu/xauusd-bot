@@ -87,7 +87,16 @@ MODEL_PATH = BASE_DIR / "ml_model.joblib"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Настройки AI-Аналитика (AI Mentor) через Gemini API (Google AI Studio)
+# Настройки AI-Аналитика (AI Mentor):
+# 1. Groq (Рекомендуется: 100% бесплатно навсегда, без карт, модели Llama 3.3 70B / DeepSeek R1, https://console.groq.com)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+
+# 2. OpenRouter (Бесплатные модели с суффиксом :free, https://openrouter.ai)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
+
+# 3. Google Gemini API (Google AI Studio)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip()
 AI_ANALYST_ENABLED = os.getenv("AI_ANALYST_ENABLED", "true").lower() in ("true", "1", "yes")
 

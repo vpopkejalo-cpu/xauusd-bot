@@ -18,6 +18,10 @@ from config import (
     TELEGRAM_CHAT_ID,
     FINNHUB_API_KEY,
     NEWS_API_KEY,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
     GEMINI_API_KEY,
     NEWS_FILTER_ENABLED,
     SYMBOLS,
@@ -221,40 +225,100 @@ def _check_google_rss() -> Dict[str, Any]:
         }
 
 
-def _check_gemini() -> Dict[str, Any]:
-    if not GEMINI_API_KEY:
-        return {
-            "status": "INFO",
-            "title": "Gemini AI (Google Studio)",
-            "message": "Ключ не задан в .env/Render (активен встроенный квантовый аудитор)",
-            "icon": "⚪"
-        }
-    t0 = time.time()
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-        resp = requests.get(url, timeout=5)
-        latency = int((time.time() - t0) * 1000)
-        if resp.status_code == 200:
+def _check_ai_engine() -> Dict[str, Any]:
+    # 1. Проверяем Groq (Приоритетный бесплатный провайдер)
+    if GROQ_API_KEY:
+        t0 = time.time()
+        try:
+            url = "https://api.groq.com/openai/v1/models"
+            headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+            resp = requests.get(url, headers=headers, timeout=5)
+            latency = int((time.time() - t0) * 1000)
+            if resp.status_code == 200:
+                return {
+                    "status": "OK",
+                    "title": f"Groq AI ({GROQ_MODEL})",
+                    "message": f"Авторизован ({latency} мс, бесплатный тариф без карт)",
+                    "icon": "🟢"
+                }
             return {
-                "status": "OK",
-                "title": "Gemini AI (Google Studio)",
-                "message": f"Авторизован ({latency} мс, Flash 1.5 активен)",
-                "icon": "🟢"
+                "status": "ERROR",
+                "title": "Groq AI",
+                "message": f"HTTP {resp.status_code} (неверный GROQ_API_KEY)",
+                "icon": "🔴"
             }
-        else:
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "title": "Groq AI",
+                "message": f"Сбой: {e}",
+                "icon": "🔴"
+            }
+
+    # 2. Проверяем OpenRouter (Второй бесплатный провайдер)
+    if OPENROUTER_API_KEY:
+        t0 = time.time()
+        try:
+            url = "https://openrouter.ai/api/v1/auth/key"
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+            resp = requests.get(url, headers=headers, timeout=5)
+            latency = int((time.time() - t0) * 1000)
+            if resp.status_code == 200:
+                return {
+                    "status": "OK",
+                    "title": f"OpenRouter AI ({OPENROUTER_MODEL})",
+                    "message": f"Авторизован ({latency} мс, бесплатный режим :free)",
+                    "icon": "🟢"
+                }
+            return {
+                "status": "ERROR",
+                "title": "OpenRouter AI",
+                "message": f"HTTP {resp.status_code}",
+                "icon": "🔴"
+            }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "title": "OpenRouter AI",
+                "message": f"Сбой: {e}",
+                "icon": "🔴"
+            }
+
+    # 3. Проверяем Gemini (Резерв)
+    if GEMINI_API_KEY:
+        t0 = time.time()
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+            resp = requests.get(url, timeout=5)
+            latency = int((time.time() - t0) * 1000)
+            if resp.status_code == 200:
+                return {
+                    "status": "OK",
+                    "title": "Gemini AI (Google Studio)",
+                    "message": f"Авторизован ({latency} мс)",
+                    "icon": "🟢"
+                }
             return {
                 "status": "ERROR",
                 "title": "Gemini AI (Google Studio)",
-                "message": f"HTTP {resp.status_code} (неверный ключ AI Studio)",
+                "message": f"HTTP {resp.status_code} (неверный ключ)",
                 "icon": "🔴"
             }
-    except Exception as e:
-        return {
-            "status": "ERROR",
-            "title": "Gemini AI (Google Studio)",
-            "message": f"Сбой: {e}",
-            "icon": "🔴"
-        }
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "title": "Gemini AI (Google Studio)",
+                "message": f"Сбой: {e}",
+                "icon": "🔴"
+            }
+
+    # 4. Ни один ключ не задан
+    return {
+        "status": "INFO",
+        "title": "AI-Ментор",
+        "message": "Ключ не задан (активен квантовый аудитор. Рекомендуем бесплатный Groq: console.groq.com)",
+        "icon": "⚪"
+    }
 
 
 def _check_telegram() -> Dict[str, Any]:
@@ -383,13 +447,13 @@ def run_full_system_check() -> Dict[str, Any]:
     t_start = time.time()
     
     # 1. Параллельный опрос всех внешних API
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         f_twelve = executor.submit(_check_twelve_data)
         f_yahoo = executor.submit(_check_yahoo_finance)
         f_finnhub = executor.submit(_check_finnhub)
         f_newsapi = executor.submit(_check_newsapi)
         f_rss = executor.submit(_check_google_rss)
-        f_gemini = executor.submit(_check_gemini)
+        f_ai = executor.submit(_check_ai_engine)
         f_tg = executor.submit(_check_telegram)
         f_db = executor.submit(_check_database)
 
@@ -399,7 +463,7 @@ def run_full_system_check() -> Dict[str, Any]:
         "finnhub": f_finnhub.result(),
         "newsapi": f_newsapi.result(),
         "google_rss": f_rss.result(),
-        "gemini": f_gemini.result(),
+        "ai_mentor": f_ai.result(),
         "telegram": f_tg.result(),
         "database": f_db.result(),
     }
@@ -440,7 +504,7 @@ def run_full_system_check() -> Dict[str, Any]:
         f"{api_results['finnhub']['icon']} <b>{api_results['finnhub']['title']}:</b> {api_results['finnhub']['message']}",
         f"{api_results['newsapi']['icon']} <b>{api_results['newsapi']['title']}:</b> {api_results['newsapi']['message']}",
         f"{api_results['google_rss']['icon']} <b>{api_results['google_rss']['title']}:</b> {api_results['google_rss']['message']}",
-        f"{api_results['gemini']['icon']} <b>{api_results['gemini']['title']}:</b> {api_results['gemini']['message']}",
+        f"{api_results['ai_mentor']['icon']} <b>{api_results['ai_mentor']['title']}:</b> {api_results['ai_mentor']['message']}",
         f"🛡 <b>Новостной щит:</b> {'Включен (NFP/CPI фильтр)' if NEWS_FILTER_ENABLED else 'Отключен'}\n",
         "🧠 <b>3. РАБОТОСПОСОБНОСТЬ ВЕСОВ И МОДЕЛЕЙ ML:</b>"
     ]
