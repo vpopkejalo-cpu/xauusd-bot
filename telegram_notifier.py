@@ -12,6 +12,8 @@
 
 import time
 import threading
+import math
+import re
 import requests
 import logging
 from typing import Optional, Dict, Any, List
@@ -37,7 +39,9 @@ from database import (
     is_bot_paused,
     request_retrain,
     set_signal_message_id,
-    set_signal_entered_at
+    set_signal_entered_at,
+    update_signal_levels,
+    get_signal_level_history
 )
 
 logger = logging.getLogger(__name__)
@@ -121,6 +125,107 @@ class TelegramNotifier:
         self.last_update_id = 0
         self.is_polling = False
         self.latest_prices: Dict[str, float] = {}
+        self.pending_level_updates: Dict[Any, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _trade_markup(signal_id: int) -> Dict:
+        return {"inline_keyboard": [
+            [
+                {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{signal_id}"},
+                {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{signal_id}"}
+            ],
+            [{"text": "✏️ Изменить TP/SL", "callback_data": f"levels_{signal_id}"}],
+            [{"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{signal_id}"}]
+        ]}
+
+    @staticmethod
+    def _parse_trade_levels(text: str):
+        tp_match = re.search(r"\bTP\s*[:= ]\s*(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+        sl_match = re.search(r"\bSL\s*[:= ]\s*(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+        if not tp_match or not sl_match:
+            return None
+        try:
+            tp = float(tp_match.group(1).replace(",", "."))
+            sl = float(sl_match.group(1).replace(",", "."))
+            if not math.isfinite(tp) or not math.isfinite(sl):
+                return None
+            return tp, sl
+        except ValueError:
+            return None
+
+    def _apply_level_update_message(self, msg: Dict[str, Any]) -> bool:
+        chat_id = msg.get("chat", {}).get("id")
+        pending = self.pending_level_updates.get(chat_id)
+        if not pending:
+            return False
+
+        if msg.get("text", "").strip().lower() in ("/cancel", "отмена", "отменить"):
+            self.pending_level_updates.pop(chat_id, None)
+            self.send_raw_message("Ввод новых TP/SL отменён. Текущие уровни сделки не изменены.")
+            return True
+
+        parsed = self._parse_trade_levels(msg.get("text", ""))
+        if not parsed:
+            self.send_raw_message(
+                "Не удалось распознать оба уровня. Отправьте одним сообщением, например: <code>TP=4120 SL=4090</code>.",
+                reply_to_message_id=msg.get("message_id")
+            )
+            return True
+
+        tp, sl = parsed
+        sig_id = pending["signal_id"]
+        sig = get_signal_by_id(sig_id)
+        if not sig or sig.get("status") != "OPEN":
+            self.pending_level_updates.pop(chat_id, None)
+            self.send_raw_message(f"Сделка #{sig_id} уже закрыта или не найдена. Уровни не изменены.")
+            return True
+
+        entry = float(sig["entry_price"])
+        is_buy = str(sig["direction"]).upper() == "BUY"
+        valid = (sl < entry < tp) if is_buy else (tp < entry < sl)
+        if not valid:
+            expected = "SL < вход < TP" if is_buy else "TP < вход < SL"
+            self.send_raw_message(
+                f"Уровни не подходят для {sig['direction']}. Для этой сделки нужно: <code>{expected}</code> (вход: <code>{entry}</code>). Попробуйте ещё раз.",
+                reply_to_message_id=msg.get("message_id")
+            )
+            return True
+
+        if not update_signal_levels(sig_id, tp, sl):
+            self.pending_level_updates.pop(chat_id, None)
+            self.send_raw_message(f"Не удалось обновить уровни сделки #{sig_id}: возможно, она уже закрыта.")
+            return True
+
+        self.pending_level_updates.pop(chat_id, None)
+        original_text = pending["card_text"]
+        updated_text = re.sub(r"(🏆 <b>Take Profit:</b> <code>).*?(</code>)", rf"\g<1>{tp}\g<2>", original_text, count=1)
+        updated_text = re.sub(r"(🛑 <b>Stop Loss:</b> <code>).*?(</code>)", rf"\g<1>{sl}\g<2>", updated_text, count=1)
+        history = get_signal_level_history(sig_id)
+        history_lines = []
+        for item in history:
+            changed_local = _utc_to_local_hhmm(item.get("changed_at", ""))
+            history_lines.append(
+                f"• {changed_local}: TP <code>{item['old_take_profit']}</code> → <code>{item['new_take_profit']}</code>; "
+                f"SL <code>{item['old_stop_loss']}</code> → <code>{item['new_stop_loss']}</code>"
+            )
+        history_block = "\n🕘 <b>История изменений TP/SL:</b>\n" + "\n".join(history_lines) if history_lines else ""
+        initial_block = (
+            f"\n📌 <b>Исходные уровни:</b> TP <code>{pending['initial_tp']}</code> | SL <code>{pending['initial_sl']}</code>"
+            if history else ""
+        )
+        footer_marker = "\n━━━━━━━━━━━━━━━━━━━\n"
+        insertion = updated_text.rfind(footer_marker)
+        if insertion >= 0:
+            updated_text = updated_text[:insertion] + initial_block + history_block + updated_text[insertion:]
+        self.edit_message_text(
+            pending["chat_id"], pending["message_id"], updated_text,
+            reply_markup=self._trade_markup(sig_id)
+        )
+        self.send_raw_message(
+            f"✅ Уровни сделки #{sig_id} обновлены. При закрытии PnL будет рассчитан по последнему TP/SL.",
+            reply_to_message_id=msg.get("message_id")
+        )
+        return True
 
     def update_price(self, symbol: str, price: float):
         """Кэширует последнюю цену инструмента для отображения в Статусе."""
@@ -561,6 +666,7 @@ class TelegramNotifier:
 
             status = sig.get("status", "OPEN")
             is_open = status == "OPEN"
+            level_history = get_signal_level_history(sig_id)
 
             if is_open:
                 header = f"📍 <b>КАРТОЧКА ОТКРЫТОЙ СДЕЛКИ: #{sig_id}</b>"
@@ -574,6 +680,7 @@ class TelegramNotifier:
                             {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{sig_id}"},
                             {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{sig_id}"}
                         ],
+                        [{"text": "✏️ Изменить TP/SL", "callback_data": f"levels_{sig_id}"}],
                         [
                             {"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{sig_id}"}
                         ]
@@ -592,6 +699,19 @@ class TelegramNotifier:
                 footer = f"<i>Сделка уже закрыта. Результат: <code>{sig.get('pnl', 0.0)}</code> пунктов.</i>\n<i>👆 Нажмите на цитату вверху, чтобы перейти к оригинальному сигналу в истории.</i>"
                 markup = None
 
+            levels_history_text = ""
+            if level_history:
+                history_rows = [
+                    f"• {_utc_to_local_hhmm(item.get('changed_at', ''))}: TP <code>{item['old_take_profit']}</code> → <code>{item['new_take_profit']}</code>; "
+                    f"SL <code>{item['old_stop_loss']}</code> → <code>{item['new_stop_loss']}</code>"
+                    for item in level_history
+                ]
+                levels_history_text = (
+                    f"\n📌 <b>Исходные уровни:</b> TP <code>{sig.get('initial_take_profit', sig.get('take_profit'))}</code> | "
+                    f"SL <code>{sig.get('initial_stop_loss', sig.get('stop_loss'))}</code>\n"
+                    "🕘 <b>История изменений TP/SL:</b>\n" + "\n".join(history_rows) + "\n"
+                )
+
             card_text = (
                 f"{header}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
@@ -600,6 +720,7 @@ class TelegramNotifier:
                 f"💵 <b>Цена входа:</b> <code>{sig.get('entry_price')}</code>\n"
                 f"🏆 <b>Take Profit:</b> <code>{sig.get('take_profit')}</code>\n"
                 f"🛑 <b>Stop Loss:</b> <code>{sig.get('stop_loss')}</code>\n"
+                f"{levels_history_text}"
                 f"🌊 <b>Волатильность (ATR):</b> <code>${sig.get('atr')}</code>\n"
                 f"🤖 <b>Уверенность:</b> <b>{calibrated_prob:.1%}</b>\n"
                 f"⏱ <b>Время открытия:</b> <code>{created_dt} UTC</code>\n"
@@ -618,23 +739,38 @@ class TelegramNotifier:
 
         logger.info(f"Нажата кнопка Telegram: action={action}, signal_id={sig_id}")
 
+        if action == "levels":
+            sig = get_signal_by_id(sig_id)
+            if not sig or sig.get("status") != "OPEN":
+                self.answer_callback_query(cb_id, "Изменять уровни можно только у открытой сделки.", show_alert=True)
+                return
+            self.answer_callback_query(cb_id, "Введите новые TP и SL одним сообщением.", show_alert=False)
+            self.pending_level_updates[chat_id] = {
+                "signal_id": sig_id,
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "card_text": orig_text,
+                "initial_tp": sig.get("initial_take_profit", sig["take_profit"]),
+                "initial_sl": sig.get("initial_stop_loss", sig["stop_loss"])
+            }
+            self.send_raw_message(
+                f"✏️ <b>Новые уровни для сделки #{sig_id}</b>\n"
+                f"Текущий TP: <code>{sig['take_profit']}</code> | SL: <code>{sig['stop_loss']}</code>\n"
+                f"Вход: <code>{sig['entry_price']}</code> ({sig['direction']})\n\n"
+                "Отправьте оба значения одним сообщением, например: <code>TP=4120 SL=4090</code>.\n"
+                "Для BUY: SL ниже входа, TP выше. Для SELL: TP ниже входа, SL выше.\n"
+                "Можно менять уровни снова этой же кнопкой; все изменения сохраняются в истории.",
+                reply_to_message_id=msg_id
+            )
+            return
+
         if action == "enter":
             self.answer_callback_query(cb_id, "Сделка принята! Укажите результат после ее закрытия.", show_alert=False)
             # Фиксируем точное время входа в сделку
             if sig_id:
                 set_signal_entered_at(sig_id)
             new_text = orig_text + "\n\n<b>Статус:</b> ВЫ В СДЕЛКЕ 🟢\n<i>Когда закроете позицию брокера, нажмите результат:</i>"
-            markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{sig_id}"},
-                        {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{sig_id}"}
-                    ],
-                    [
-                        {"text": "✖️ Сбросить / Вышел в 0", "callback_data": f"manual_{sig_id}"}
-                    ]
-                ]
-            }
+            markup = self._trade_markup(sig_id)
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=markup)
 
         elif action == "skip":
@@ -709,6 +845,9 @@ class TelegramNotifier:
         text = msg.get("text", "").strip()
         lower_text = text.lower()
         chat_id = msg.get("chat", {}).get("id")
+
+        if self._apply_level_update_message(msg):
+            return
 
         # 1. Кнопка "📊 Статус Бота"
         if "статус" in lower_text:

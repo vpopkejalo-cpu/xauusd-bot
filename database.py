@@ -110,6 +110,8 @@ def init_db():
                     entry_price REAL NOT NULL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
+                    initial_take_profit REAL,
+                    initial_stop_loss REAL,
                     atr REAL NOT NULL,
                     probability REAL NOT NULL,
                     status TEXT DEFAULT 'OPEN',
@@ -123,8 +125,25 @@ def init_db():
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_stop_loss REAL")
             except Exception:
                 pass
+
+            cursor.execute("UPDATE signals SET initial_take_profit = take_profit WHERE initial_take_profit IS NULL")
+            cursor.execute("UPDATE signals SET initial_stop_loss = stop_loss WHERE initial_stop_loss IS NULL")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS signal_level_history (
+                    id SERIAL PRIMARY KEY,
+                    signal_id INTEGER NOT NULL,
+                    old_take_profit REAL NOT NULL,
+                    old_stop_loss REAL NOT NULL,
+                    new_take_profit REAL NOT NULL,
+                    new_stop_loss REAL NOT NULL,
+                    changed_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -184,6 +203,8 @@ def init_db():
                     entry_price REAL NOT NULL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
+                    initial_take_profit REAL,
+                    initial_stop_loss REAL,
                     atr REAL NOT NULL,
                     probability REAL NOT NULL,
                     status TEXT DEFAULT 'OPEN',
@@ -202,8 +223,27 @@ def init_db():
                     cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
                 if "diagnostic_data" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN diagnostic_data TEXT")
+                if "initial_take_profit" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN initial_take_profit REAL")
+                if "initial_stop_loss" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN initial_stop_loss REAL")
             except Exception:
                 pass
+
+            cursor.execute("UPDATE signals SET initial_take_profit = take_profit WHERE initial_take_profit IS NULL")
+            cursor.execute("UPDATE signals SET initial_stop_loss = stop_loss WHERE initial_stop_loss IS NULL")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS signal_level_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER NOT NULL,
+                    old_take_profit REAL NOT NULL,
+                    old_stop_loss REAL NOT NULL,
+                    new_take_profit REAL NOT NULL,
+                    new_stop_loss REAL NOT NULL,
+                    changed_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -451,14 +491,17 @@ def save_signal(
         if IS_POSTGRES:
             cursor.execute("""
                 INSERT INTO signals (
-                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status, diagnostic_data
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s)
+                    created_at, symbol, direction, entry_price, take_profit, stop_loss,
+                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s)
                 RETURNING id
             """, (
                 datetime.utcnow().isoformat(),
                 str(symbol),
                 str(direction),
                 float(entry_price),
+                float(take_profit),
+                float(stop_loss),
                 float(take_profit),
                 float(stop_loss),
                 float(atr),
@@ -470,13 +513,16 @@ def save_signal(
         else:
             cursor.execute("""
                 INSERT INTO signals (
-                    created_at, symbol, direction, entry_price, take_profit, stop_loss, atr, probability, status, diagnostic_data
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                    created_at, symbol, direction, entry_price, take_profit, stop_loss,
+                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """, (
                 datetime.utcnow().isoformat(),
                 str(symbol),
                 str(direction),
                 float(entry_price),
+                float(take_profit),
+                float(stop_loss),
                 float(take_profit),
                 float(stop_loss),
                 float(atr),
@@ -546,6 +592,48 @@ def get_signal_by_id(signal_id: int) -> Optional[Dict[str, Any]]:
         cursor.execute(sql, (int(signal_id),))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def update_signal_levels(signal_id: int, take_profit: float, stop_loss: float) -> bool:
+    """Сохраняет новую пару уровней открытой сделки и добавляет запись в историю."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as cursor:
+        sql = _adapt_sql("SELECT take_profit, stop_loss FROM signals WHERE id = ? AND status = 'OPEN'")
+        cursor.execute(sql, (int(signal_id),))
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        old_tp = float(row["take_profit"])
+        old_sl = float(row["stop_loss"])
+        new_tp = float(take_profit)
+        new_sl = float(stop_loss)
+        if old_tp == new_tp and old_sl == new_sl:
+            return True
+
+        update_sql = _adapt_sql("""
+            UPDATE signals SET take_profit = ?, stop_loss = ?
+            WHERE id = ? AND status = 'OPEN'
+        """)
+        cursor.execute(update_sql, (new_tp, new_sl, int(signal_id)))
+        if cursor.rowcount != 1:
+            return False
+
+        history_sql = _adapt_sql("""
+            INSERT INTO signal_level_history
+                (signal_id, old_take_profit, old_stop_loss, new_take_profit, new_stop_loss, changed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """)
+        cursor.execute(history_sql, (int(signal_id), old_tp, old_sl, new_tp, new_sl, now))
+        return True
+
+
+def get_signal_level_history(signal_id: int) -> List[Dict[str, Any]]:
+    """Возвращает изменения TP/SL сделки в хронологическом порядке."""
+    sql = _adapt_sql("SELECT * FROM signal_level_history WHERE signal_id = ? ORDER BY id ASC")
+    with get_db() as cursor:
+        cursor.execute(sql, (int(signal_id),))
+        return [dict(row) for row in cursor.fetchall()]
 
 
 def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
