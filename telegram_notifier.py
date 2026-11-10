@@ -159,12 +159,19 @@ class TelegramNotifier:
         if not pending:
             return False
 
-        if msg.get("text", "").strip().lower() in ("/cancel", "отмена", "отменить"):
+        message_text = msg.get("text", "").strip()
+        if message_text.lower() in ("/cancel", "отмена", "отменить"):
             self.pending_level_updates.pop(chat_id, None)
             self.send_raw_message("Ввод новых TP/SL отменён. Текущие уровни сделки не изменены.")
             return True
 
-        parsed = self._parse_trade_levels(msg.get("text", ""))
+        # Не перехватываем обычные команды/кнопки Telegram, пока ожидаем уровни.
+        # Обрабатываем здесь только сообщения, похожие на ввод TP или SL.
+        looks_like_level_input = re.search(r"\b(?:TP|SL)\b", message_text, re.IGNORECASE)
+        if not looks_like_level_input:
+            return False
+
+        parsed = self._parse_trade_levels(message_text)
         if not parsed:
             self.send_raw_message(
                 "Не удалось распознать оба уровня. Отправьте одним сообщением, например: <code>TP=4120 SL=4090</code>.",
@@ -186,7 +193,9 @@ class TelegramNotifier:
         if not valid:
             expected = "SL < вход < TP" if is_buy else "TP < вход < SL"
             self.send_raw_message(
-                f"Уровни не подходят для {sig['direction']}. Для этой сделки нужно: <code>{expected}</code> (вход: <code>{entry}</code>). Попробуйте ещё раз.",
+                f"❌ Получено TP=<code>{tp}</code>, SL=<code>{sl}</code>. Эти уровни не подходят для сделки #{sig_id} ({sig['symbol']}, {sig['direction']}).\n"
+                f"Вход: <code>{entry}</code>; требуется <code>{expected}</code>.\n"
+                f"Введите цены именно для {sig['symbol']}, например: <code>TP={sig['take_profit']} SL={sig['stop_loss']}</code> (текущие уровни).",
                 reply_to_message_id=msg.get("message_id")
             )
             return True
@@ -757,7 +766,7 @@ class TelegramNotifier:
                 f"✏️ <b>Новые уровни для сделки #{sig_id}</b>\n"
                 f"Текущий TP: <code>{sig['take_profit']}</code> | SL: <code>{sig['stop_loss']}</code>\n"
                 f"Вход: <code>{sig['entry_price']}</code> ({sig['direction']})\n\n"
-                "Отправьте оба значения одним сообщением, например: <code>TP=4120 SL=4090</code>.\n"
+                f"Отправьте оба значения одним сообщением в формате <code>TP={sig['take_profit']} SL={sig['stop_loss']}</code> (это текущие уровни сделки).\n"
                 "Для BUY: SL ниже входа, TP выше. Для SELL: TP ниже входа, SL выше.\n"
                 "Можно менять уровни снова этой же кнопкой; все изменения сохраняются в истории.",
                 reply_to_message_id=msg_id
