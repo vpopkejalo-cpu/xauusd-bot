@@ -147,10 +147,11 @@ class TelegramNotifier:
 *{box-sizing:border-box}body{margin:0;padding:14px;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#17212b);font:14px -apple-system,BlinkMacSystemFont,Arial,sans-serif}.card{border:1px solid var(--tg-theme-hint-color,#d8dee5);border-radius:16px;padding:14px;background:var(--tg-theme-secondary-bg-color,#f4f6f8)}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.title{font-weight:700;font-size:16px}.badge{padding:5px 9px;border-radius:20px;background:#e5f5eb;color:#16834b;font-weight:700}.meta{color:var(--tg-theme-hint-color,#707579);font-size:12px}.levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin:14px 0}.level{padding:9px 5px;border-radius:11px;background:var(--tg-theme-bg-color,#fff);text-align:center;border:1px solid #00000010}.label{font-size:11px;color:var(--tg-theme-hint-color,#707579);margin-bottom:5px}.value{font-weight:700;font-size:13px;word-break:break-all}.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.btn{border:0;border-radius:11px;padding:11px 7px;background:var(--tg-theme-button-color,#3390ec);color:var(--tg-theme-button-text-color,#fff);font-weight:700;font-size:13px}.secondary{background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#17212b);border:1px solid #00000018}.danger{background:#fff0ef;color:#c7433d}.wide{grid-column:1/-1}.note{margin-top:11px;text-align:center;color:var(--tg-theme-hint-color,#707579);font-size:11px}.editor{display:none}.readout{padding:10px;text-align:center;font-size:20px;font-weight:700;background:var(--tg-theme-bg-color,#fff);border-radius:10px;margin:10px 0}.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.pad .btn{padding:9px}.toast{min-height:18px;text-align:center;color:var(--tg-theme-hint-color,#707579);margin-top:7px;font-size:12px}
 </style></head><body><div class="card"><div class="top"><div><div class="title" id="title">Сделка</div><div class="meta" id="symbol"></div></div><div class="badge" id="badge">СИГНАЛ</div></div><div class="meta" id="direction"></div><div class="levels" id="levels"></div><div class="actions" id="actions"></div><div class="editor" id="editor"><div class="meta" id="editLabel"></div><div class="readout" id="readout"></div><div class="pad" id="pad"></div><div class="actions" style="margin-top:8px"><button class="btn secondary" id="cancel">Назад</button><button class="btn" id="next">Далее</button></div></div><div class="toast" id="toast"></div><div class="note">Изменения уровней сохраняются в истории сделки</div></div><script>
 const W=window.TelegramWidget;let s={};try{s=JSON.parse(W.chatData||'{}')}catch(e){};let edit=null,buf='',busy=false,draft={};
-function el(id){return document.getElementById(id)}function req(data){if(busy)return;busy=true;el('toast').textContent='Сохраняю…';W.request(data).then(r=>{el('toast').textContent=r&&r.result||'Готово';setTimeout(()=>{el('toast').textContent=''},2200)}).catch(e=>{el('toast').textContent='Не удалось: '+(e.code||'повторите');}).finally(()=>busy=false)}
-function render(){el('title').textContent='Сделка #'+s.id;el('symbol').textContent=s.symbol||'';el('direction').textContent=(s.direction==='BUY'?'🟢 Покупка':'🔴 Продажа')+' · вход по сигналу '+s.reference;el('badge').textContent=s.status==='OPEN'?(s.entered?'В РЫНКЕ':'СИГНАЛ'):s.status;el('levels').innerHTML=[['ФАКТ. ВХОД',s.entry],['TAKE PROFIT',s.tp],['STOP LOSS',s.sl]].map(x=>'<div class="level"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');let a=el('actions');a.innerHTML='';el('editor').style.display='none';if(s.status!=='OPEN')return;
-if(!s.entered){a.innerHTML='<button class="btn" id="enter">✅ Вошёл</button><button class="btn secondary" id="skip">⏭ Пропустить</button>';el('enter').onclick=()=>req('e|'+s.id);el('skip').onclick=()=>req('k|'+s.id);return}
-a.innerHTML='<button class="btn secondary wide" id="change">✏️ Изменить вход / TP / SL</button><button class="btn" id="win">🏆 Закрылся по TP</button><button class="btn danger" id="loss">🛑 Закрылся по SL</button><button class="btn secondary wide" id="manual">Закрыть вручную / в 0</button>';el('change').onclick=()=>selectField('entry');el('win').onclick=()=>req('w|'+s.id);el('loss').onclick=()=>req('l|'+s.id);el('manual').onclick=()=>req('m|'+s.id)}
+function el(id){return document.getElementById(id)}function req(data){if(busy)return;busy=true;el('toast').textContent='Сохраняю…';W.request(data).then(r=>{let result=r&&r.result;try{let reply=JSON.parse(result);if(reply.state){s=reply.state;render()}result=reply.message||result}catch(e){}el('toast').textContent=result||'Готово';setTimeout(()=>{el('toast').textContent=''},2200)}).catch(e=>{el('toast').textContent='Не удалось: '+(e.code||'повторите');}).finally(()=>busy=false)}
+function copyLevels(){try{W.copyText('Entry='+s.entry+' TP='+s.tp+' SL='+s.sl);el('toast').textContent='Уровни скопированы'}catch(e){el('toast').textContent='Не удалось скопировать уровни'}}
+function render(){el('title').textContent='Сделка #'+s.id;el('symbol').textContent=s.symbol||'';el('direction').textContent=(s.direction==='BUY'?'🟢 Покупка':'🔴 Продажа')+' · вход по сигналу '+s.reference;el('badge').textContent=s.status==='OPEN'?(s.entered?'В РЫНКЕ':'СИГНАЛ'):s.status;el('levels').innerHTML=[[s.entered?'ФАКТ. ВХОД':'ВХОД (СИГНАЛ)',s.entry],['TAKE PROFIT',s.tp],['STOP LOSS',s.sl]].map(x=>'<div class="level"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');let a=el('actions');a.innerHTML='';el('editor').style.display='none';if(s.status!=='OPEN')return;
+if(!s.entered){a.innerHTML='<button class="btn secondary wide" id="copy">📋 Скопировать уровни</button><button class="btn" id="enter">✅ Вошёл</button><button class="btn secondary" id="skip">⏭ Пропустить</button>';el('copy').onclick=copyLevels;el('enter').onclick=()=>req('e|'+s.id);el('skip').onclick=()=>req('k|'+s.id);return}
+a.innerHTML='<button class="btn secondary wide" id="copy">📋 Скопировать уровни</button><button class="btn secondary wide" id="change">✏️ Изменить вход / TP / SL</button><button class="btn" id="win">🏆 Закрылся по TP</button><button class="btn danger" id="loss">🛑 Закрылся по SL</button><button class="btn secondary wide" id="manual">Закрыть вручную / в 0</button>';el('copy').onclick=copyLevels;el('change').onclick=()=>selectField('entry');el('win').onclick=()=>req('w|'+s.id);el('loss').onclick=()=>req('l|'+s.id);el('manual').onclick=()=>req('m|'+s.id)}
 function selectField(f){edit=f;buf=String(draft[f]===undefined?s[f]:draft[f]);el('actions').style.display='none';el('editor').style.display='block';el('editLabel').textContent='Новое значение: '+({entry:'Фактический вход',tp:'Take Profit',sl:'Stop Loss'}[f]);el('next').textContent=f==='sl'?'Сохранить':'Далее';drawPad()}
 function drawPad(){el('readout').textContent=buf||'0';el('pad').innerHTML=['1','2','3','4','5','6','7','8','9','−','0','.','⌫','Очистить'].map(k=>'<button class="btn secondary">'+k+'</button>').join('');[...el('pad').children].forEach(b=>b.onclick=()=>{let k=b.textContent;if(k==='⌫')buf=buf.slice(0,-1);else if(k==='Очистить')buf='';else if(k==='−'&&!buf)buf='-';else if(k==='.'&&!buf.includes('.'))buf+='.';else if(/[0-9]/.test(k))buf+=k;drawPad()})}
 el('cancel').onclick=()=>{draft={};el('editor').style.display='none';el('actions').style.display='grid'};el('next').onclick=()=>{if(!isFinite(Number(buf))||Number(buf)<=0){el('toast').textContent='Введите корректную цену';return}draft[edit]=Number(buf);if(edit==='entry'){selectField('tp');return}if(edit==='tp'){selectField('sl');return}let entry=Number(draft.entry===undefined?s.entry:draft.entry),tp=Number(draft.tp===undefined?s.tp:draft.tp),sl=Number(draft.sl),buy=s.direction==='BUY';if(!(buy?sl<entry&&entry<tp:tp<entry&&entry<sl)){el('toast').textContent='Проверьте порядок Entry / TP / SL';return}let payload=['v',s.id,entry,tp,sl].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload)};
@@ -165,7 +166,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                  "entered": bool(entered), "status": "OPEN"}
         payload = {"chat_id": self.chat_id, "html": self._trade_widget_html(), "width": 390,
                    "chat_data": json.dumps(state, separators=(",", ":")), "allow_queries": True,
-                   "caption": f"📍 Сделка #{signal_id} · {state['symbol']}"}
+                   "caption": self._trade_widget_caption(state)}
         if reply_to_message_id:
             payload["reply_parameters"] = {"message_id": int(reply_to_message_id), "allow_sending_without_reply": True}
         try:
@@ -177,6 +178,18 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         except Exception as exc:
             logger.warning("Ошибка sendWidget, использую обычную карточку: %s", exc)
         return None
+
+    @staticmethod
+    def _trade_widget_caption(state: Dict[str, Any]) -> str:
+        """Текстовая подпись оставляет уровни доступными для копирования вне виджета."""
+        status = "В РЫНКЕ" if state.get("entered") else "СИГНАЛ"
+        if state.get("status") != "OPEN":
+            status = str(state["status"])
+        return (
+            f"📍 <b>Сделка #{state['id']} · {state.get('symbol', '')}</b> — {status}\n"
+            f"Вход: <code>{state.get('entry')}</code>  ·  "
+            f"TP: <code>{state.get('tp')}</code>  ·  SL: <code>{state.get('sl')}</code>"
+        )
 
     def _handle_widget_query(self, query: Dict[str, Any]):
         """Проверяет владельца карточки, применяет действие и синхронизирует её состояние."""
@@ -193,12 +206,14 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         if sender_id != str(self.chat_id):
             answer("Эта карточка доступна только владельцу бота.")
             return
-        msg = query.get("message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
-        msg_id = msg.get("message_id")
+        # В WidgetQuery chat и message_id находятся на верхнем уровне, не внутри message.
+        chat = query.get("chat") or {}
+        chat_id = chat.get("id")
+        msg_id = query.get("message_id")
         try:
             parts = str(query.get("data", "")).split("|")
             action, sig_id = parts[0], int(parts[1])
+            feedback = ""
             sig = get_signal_by_id(sig_id)
             if not sig:
                 answer("Сделка не найдена.")
@@ -208,13 +223,13 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                     answer("Эта сделка уже закрыта.")
                     return
                 set_signal_entered_at(sig_id)
-                answer("Вход отмечен. Можно изменить три цены или зафиксировать закрытие.")
+                feedback = "Вход отмечен. Можно изменить цены или зафиксировать закрытие."
             elif action == "k":
                 if sig.get("status") != "OPEN":
                     answer("Эта сделка уже закрыта.")
                     return
                 update_signal_status(sig_id, "SKIPPED", 0.0, 0.0)
-                answer("Сигнал отмечен как пропущенный.")
+                feedback = "Сигнал отмечен как пропущенный."
             elif action == "v":
                 if len(parts) != 5 or sig.get("status") != "OPEN":
                     answer("Сделка уже закрыта или данные некорректны.")
@@ -230,7 +245,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 if not update_signal_trade_values(sig_id, entry, tp, sl):
                     answer("Не удалось сохранить: сделка могла закрыться.")
                     return
-                answer("Сохранено. Новые уровни добавлены в историю сделки.")
+                feedback = "Сохранено. Изменение добавлено в историю сделки."
             elif action in ("w", "l", "m"):
                 if sig.get("status") != "OPEN":
                     answer("Результат уже зафиксирован.")
@@ -247,7 +262,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 else:
                     exit_price, pnl, status = entry, 0.0, "MANUAL_CLOSE"
                 update_signal_status(sig_id, status, exit_price, pnl)
-                answer("Результат сделки сохранён.")
+                feedback = "Результат сделки сохранён."
             else:
                 answer("Неизвестное действие.")
                 return
@@ -261,10 +276,21 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             if action == "e":
                 state["entered"] = True
             if chat_id is not None and msg_id is not None:
-                requests.post(f"{self.base_url}/editMessageWidgetData", json={
+                state_response = requests.post(f"{self.base_url}/editMessageWidgetData", json={
                     "chat_id": chat_id, "message_id": msg_id,
                     "chat_data": json.dumps(state, separators=(",", ":"))
                 }, timeout=5)
+                if not state_response.ok or not state_response.json().get("ok"):
+                    logger.warning("Telegram не обновил состояние виджета для сделки #%s: %s",
+                                   sig_id, state_response.text)
+                # Caption остаётся обычным текстом сообщения: цены можно выделить и скопировать.
+                caption_response = requests.post(f"{self.base_url}/editMessageCaption", json={
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "caption": self._trade_widget_caption(state), "parse_mode": "HTML"
+                }, timeout=5)
+                if not caption_response.ok or not caption_response.json().get("ok"):
+                    logger.debug("Подпись виджета сделки #%s не обновлена: %s", sig_id, caption_response.text)
+            answer(json.dumps({"message": feedback, "state": state}, ensure_ascii=False, separators=(",", ":")))
         except Exception:
             logger.exception("Ошибка обработки widget_query")
             answer("Не удалось обработать действие. Проверьте карточку и попробуйте снова.")
