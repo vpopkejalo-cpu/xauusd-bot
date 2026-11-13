@@ -14,6 +14,7 @@ import time
 import threading
 import math
 import re
+import json
 import requests
 import logging
 from typing import Optional, Dict, Any, List
@@ -41,7 +42,8 @@ from database import (
     set_signal_message_id,
     set_signal_entered_at,
     update_signal_levels,
-    get_signal_level_history
+    get_signal_level_history,
+    update_signal_trade_values
 )
 
 logger = logging.getLogger(__name__)
@@ -137,6 +139,135 @@ class TelegramNotifier:
             [{"text": "✏️ Изменить TP/SL", "callback_data": f"levels_{signal_id}"}],
             [{"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{signal_id}"}]
         ]}
+
+    @staticmethod
+    def _trade_widget_html() -> str:
+        """Небольшая карточка с локальной цифровой клавиатурой (без сетевых запросов)."""
+        return '''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+*{box-sizing:border-box}body{margin:0;padding:14px;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#17212b);font:14px -apple-system,BlinkMacSystemFont,Arial,sans-serif}.card{border:1px solid var(--tg-theme-hint-color,#d8dee5);border-radius:16px;padding:14px;background:var(--tg-theme-secondary-bg-color,#f4f6f8)}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.title{font-weight:700;font-size:16px}.badge{padding:5px 9px;border-radius:20px;background:#e5f5eb;color:#16834b;font-weight:700}.meta{color:var(--tg-theme-hint-color,#707579);font-size:12px}.levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin:14px 0}.level{padding:9px 5px;border-radius:11px;background:var(--tg-theme-bg-color,#fff);text-align:center;border:1px solid #00000010}.label{font-size:11px;color:var(--tg-theme-hint-color,#707579);margin-bottom:5px}.value{font-weight:700;font-size:13px;word-break:break-all}.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.btn{border:0;border-radius:11px;padding:11px 7px;background:var(--tg-theme-button-color,#3390ec);color:var(--tg-theme-button-text-color,#fff);font-weight:700;font-size:13px}.secondary{background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#17212b);border:1px solid #00000018}.danger{background:#fff0ef;color:#c7433d}.wide{grid-column:1/-1}.note{margin-top:11px;text-align:center;color:var(--tg-theme-hint-color,#707579);font-size:11px}.editor{display:none}.readout{padding:10px;text-align:center;font-size:20px;font-weight:700;background:var(--tg-theme-bg-color,#fff);border-radius:10px;margin:10px 0}.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.pad .btn{padding:9px}.toast{min-height:18px;text-align:center;color:var(--tg-theme-hint-color,#707579);margin-top:7px;font-size:12px}
+</style></head><body><div class="card"><div class="top"><div><div class="title" id="title">Сделка</div><div class="meta" id="symbol"></div></div><div class="badge" id="badge">СИГНАЛ</div></div><div class="meta" id="direction"></div><div class="levels" id="levels"></div><div class="actions" id="actions"></div><div class="editor" id="editor"><div class="meta" id="editLabel"></div><div class="readout" id="readout"></div><div class="pad" id="pad"></div><div class="actions" style="margin-top:8px"><button class="btn secondary" id="cancel">Назад</button><button class="btn" id="next">Далее</button></div></div><div class="toast" id="toast"></div><div class="note">Изменения уровней сохраняются в истории сделки</div></div><script>
+const W=window.TelegramWidget;let s={};try{s=JSON.parse(W.chatData||'{}')}catch(e){};let edit=null,buf='',busy=false,draft={};
+function el(id){return document.getElementById(id)}function req(data){if(busy)return;busy=true;el('toast').textContent='Сохраняю…';W.request(data).then(r=>{el('toast').textContent=r&&r.result||'Готово';setTimeout(()=>{el('toast').textContent=''},2200)}).catch(e=>{el('toast').textContent='Не удалось: '+(e.code||'повторите');}).finally(()=>busy=false)}
+function render(){el('title').textContent='Сделка #'+s.id;el('symbol').textContent=s.symbol||'';el('direction').textContent=(s.direction==='BUY'?'🟢 Покупка':'🔴 Продажа')+' · вход по сигналу '+s.reference;el('badge').textContent=s.status==='OPEN'?(s.entered?'В РЫНКЕ':'СИГНАЛ'):s.status;el('levels').innerHTML=[['ФАКТ. ВХОД',s.entry],['TAKE PROFIT',s.tp],['STOP LOSS',s.sl]].map(x=>'<div class="level"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');let a=el('actions');a.innerHTML='';el('editor').style.display='none';if(s.status!=='OPEN')return;
+if(!s.entered){a.innerHTML='<button class="btn" id="enter">✅ Вошёл</button><button class="btn secondary" id="skip">⏭ Пропустить</button>';el('enter').onclick=()=>req('e|'+s.id);el('skip').onclick=()=>req('k|'+s.id);return}
+a.innerHTML='<button class="btn secondary wide" id="change">✏️ Изменить вход / TP / SL</button><button class="btn" id="win">🏆 Закрылся по TP</button><button class="btn danger" id="loss">🛑 Закрылся по SL</button><button class="btn secondary wide" id="manual">Закрыть вручную / в 0</button>';el('change').onclick=()=>selectField('entry');el('win').onclick=()=>req('w|'+s.id);el('loss').onclick=()=>req('l|'+s.id);el('manual').onclick=()=>req('m|'+s.id)}
+function selectField(f){edit=f;buf=String(draft[f]===undefined?s[f]:draft[f]);el('actions').style.display='none';el('editor').style.display='block';el('editLabel').textContent='Новое значение: '+({entry:'Фактический вход',tp:'Take Profit',sl:'Stop Loss'}[f]);el('next').textContent=f==='sl'?'Сохранить':'Далее';drawPad()}
+function drawPad(){el('readout').textContent=buf||'0';el('pad').innerHTML=['1','2','3','4','5','6','7','8','9','−','0','.','⌫','Очистить'].map(k=>'<button class="btn secondary">'+k+'</button>').join('');[...el('pad').children].forEach(b=>b.onclick=()=>{let k=b.textContent;if(k==='⌫')buf=buf.slice(0,-1);else if(k==='Очистить')buf='';else if(k==='−'&&!buf)buf='-';else if(k==='.'&&!buf.includes('.'))buf+='.';else if(/[0-9]/.test(k))buf+=k;drawPad()})}
+el('cancel').onclick=()=>{draft={};el('editor').style.display='none';el('actions').style.display='grid'};el('next').onclick=()=>{if(!isFinite(Number(buf))||Number(buf)<=0){el('toast').textContent='Введите корректную цену';return}draft[edit]=Number(buf);if(edit==='entry'){selectField('tp');return}if(edit==='tp'){selectField('sl');return}let entry=Number(draft.entry===undefined?s.entry:draft.entry),tp=Number(draft.tp===undefined?s.tp:draft.tp),sl=Number(draft.sl),buy=s.direction==='BUY';if(!(buy?sl<entry&&entry<tp:tp<entry&&entry<sl)){el('toast').textContent='Проверьте порядок Entry / TP / SL';return}let payload=['v',s.id,entry,tp,sl].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload)};
+W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}catch(e){}});render();
+</script></body></html>'''
+
+    def _send_trade_widget(self, signal_id: int, symbol: str, direction: str, entry: float,
+                           tp: float, sl: float, reply_to_message_id: Optional[int] = None,
+                           entered: bool = False, actual_entry: Optional[float] = None) -> Optional[int]:
+        state = {"id": int(signal_id), "symbol": SYMBOL_NAMES.get(symbol, symbol), "direction": direction.upper(),
+                 "reference": float(entry), "entry": float(actual_entry if actual_entry is not None else entry), "tp": float(tp), "sl": float(sl),
+                 "entered": bool(entered), "status": "OPEN"}
+        payload = {"chat_id": self.chat_id, "html": self._trade_widget_html(), "width": 390,
+                   "chat_data": json.dumps(state, separators=(",", ":")), "allow_queries": True,
+                   "caption": f"📍 Сделка #{signal_id} · {state['symbol']}"}
+        if reply_to_message_id:
+            payload["reply_parameters"] = {"message_id": int(reply_to_message_id), "allow_sending_without_reply": True}
+        try:
+            response = requests.post(f"{self.base_url}/sendWidget", json=payload, timeout=10)
+            data = response.json()
+            if response.ok and data.get("ok"):
+                return data["result"]["message_id"]
+            logger.warning("sendWidget недоступен (%s): %s; использую обычную карточку", response.status_code, data)
+        except Exception as exc:
+            logger.warning("Ошибка sendWidget, использую обычную карточку: %s", exc)
+        return None
+
+    def _handle_widget_query(self, query: Dict[str, Any]):
+        """Проверяет владельца карточки, применяет действие и синхронизирует её состояние."""
+        qid = query.get("id")
+        sender_id = str(query.get("from", {}).get("id", ""))
+        if not qid:
+            return
+        def answer(message: str):
+            try:
+                requests.post(f"{self.base_url}/answerWidgetQuery",
+                              json={"widget_query_id": qid, "data": message[:1024]}, timeout=5)
+            except Exception:
+                logger.exception("Не удалось ответить на widget_query")
+        if sender_id != str(self.chat_id):
+            answer("Эта карточка доступна только владельцу бота.")
+            return
+        msg = query.get("message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
+        msg_id = msg.get("message_id")
+        try:
+            parts = str(query.get("data", "")).split("|")
+            action, sig_id = parts[0], int(parts[1])
+            sig = get_signal_by_id(sig_id)
+            if not sig:
+                answer("Сделка не найдена.")
+                return
+            if action == "e":
+                if sig.get("status") != "OPEN":
+                    answer("Эта сделка уже закрыта.")
+                    return
+                set_signal_entered_at(sig_id)
+                answer("Вход отмечен. Можно изменить три цены или зафиксировать закрытие.")
+            elif action == "k":
+                if sig.get("status") != "OPEN":
+                    answer("Эта сделка уже закрыта.")
+                    return
+                update_signal_status(sig_id, "SKIPPED", 0.0, 0.0)
+                answer("Сигнал отмечен как пропущенный.")
+            elif action == "v":
+                if len(parts) != 5 or sig.get("status") != "OPEN":
+                    answer("Сделка уже закрыта или данные некорректны.")
+                    return
+                entry, tp, sl = map(float, parts[2:])
+                if not all(math.isfinite(x) and x > 0 for x in (entry, tp, sl)):
+                    answer("Цены должны быть положительными числами.")
+                    return
+                buy = str(sig.get("direction", "BUY")).upper() == "BUY"
+                if not (sl < entry < tp if buy else tp < entry < sl):
+                    answer("Порядок уровней не подходит направлению сделки.")
+                    return
+                if not update_signal_trade_values(sig_id, entry, tp, sl):
+                    answer("Не удалось сохранить: сделка могла закрыться.")
+                    return
+                answer("Сохранено. Новые уровни добавлены в историю сделки.")
+            elif action in ("w", "l", "m"):
+                if sig.get("status") != "OPEN":
+                    answer("Результат уже зафиксирован.")
+                    return
+                entry = float(sig.get("actual_entry_price") or sig.get("entry_price") or 0)
+                if action == "w":
+                    exit_price = float(sig["take_profit"])
+                    pnl = abs(exit_price - entry)
+                    status = "TP_HIT"
+                elif action == "l":
+                    exit_price = float(sig["stop_loss"])
+                    pnl = -abs(exit_price - entry)
+                    status = "SL_HIT"
+                else:
+                    exit_price, pnl, status = entry, 0.0, "MANUAL_CLOSE"
+                update_signal_status(sig_id, status, exit_price, pnl)
+                answer("Результат сделки сохранён.")
+            else:
+                answer("Неизвестное действие.")
+                return
+
+            fresh = get_signal_by_id(sig_id) or sig
+            state = {"id": sig_id, "symbol": SYMBOL_NAMES.get(fresh.get("symbol", ""), fresh.get("symbol", "")),
+                     "direction": fresh.get("direction", "BUY"), "reference": fresh.get("entry_price"),
+                     "entry": fresh.get("actual_entry_price") or fresh.get("entry_price"),
+                     "tp": fresh.get("take_profit"), "sl": fresh.get("stop_loss"),
+                     "entered": bool(fresh.get("entered_at")), "status": fresh.get("status", "OPEN")}
+            if action == "e":
+                state["entered"] = True
+            if chat_id is not None and msg_id is not None:
+                requests.post(f"{self.base_url}/editMessageWidgetData", json={
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "chat_data": json.dumps(state, separators=(",", ":"))
+                }, timeout=5)
+        except Exception:
+            logger.exception("Ошибка обработки widget_query")
+            answer("Не удалось обработать действие. Проверьте карточку и попробуйте снова.")
 
     @staticmethod
     def _parse_trade_levels(text: str):
@@ -468,7 +599,9 @@ class TelegramNotifier:
             ]
         }
 
-        msg_id = self.send_raw_message(message, reply_markup=reply_markup)
+        msg_id = self._send_trade_widget(signal_id, symbol, direction, entry_price, take_profit, stop_loss)
+        if not msg_id:
+            msg_id = self.send_raw_message(message, reply_markup=reply_markup)
         if msg_id and signal_id:
             try:
                 set_signal_message_id(signal_id, msg_id)
@@ -549,7 +682,8 @@ class TelegramNotifier:
                 url = f"{self.base_url}/getUpdates"
                 params = {
                     "offset": self.last_update_id + 1,
-                    "timeout": 20
+                    "timeout": 20,
+                    "allowed_updates": json.dumps(["message", "callback_query", "widget_query"])
                 }
                 res = requests.get(url, params=params, timeout=25)
                 if res.status_code != 200:
@@ -567,6 +701,9 @@ class TelegramNotifier:
                     # Обработка нажатий на inline-кнопки
                     if "callback_query" in update:
                         self._handle_callback(update["callback_query"])
+
+                    elif "widget_query" in update:
+                        self._handle_widget_query(update["widget_query"])
 
                     # Обработка текстовых команд и нативных кнопок меню
                     elif "message" in update and "text" in update["message"]:
@@ -738,6 +875,14 @@ class TelegramNotifier:
             )
 
             orig_msg_id = sig.get("message_id")
+            if is_open:
+                widget_msg_id = self._send_trade_widget(
+                    sig_id, sym, direction, sig.get("entry_price"), sig.get("take_profit"),
+                    sig.get("stop_loss"), reply_to_message_id=orig_msg_id,
+                    entered=bool(sig.get("entered_at")), actual_entry=sig.get("actual_entry_price")
+                )
+                if widget_msg_id:
+                    return
             self.send_raw_message(card_text, reply_markup=markup, reply_to_message_id=orig_msg_id)
             return
 
@@ -793,7 +938,8 @@ class TelegramNotifier:
             self.answer_callback_query(cb_id, "Отлично! Прибыль зафиксирована.", show_alert=True)
             sig = get_signal_by_id(sig_id)
             tp_price = sig["take_profit"] if sig else 0.0
-            pnl = abs(tp_price - sig["entry_price"]) if sig else 10.0
+            trade_entry = (sig.get("actual_entry_price") or sig["entry_price"]) if sig else 0.0
+            pnl = abs(tp_price - trade_entry) if sig else 10.0
             update_signal_status(sig_id, "TP_HIT", tp_price, pnl)
 
             new_text = orig_text + "\n\n🎉 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В ПРИБЫЛЬ (TP)!</b> ✅\n<i>Результат учтен в статистике винрейта. Бот готов к новым сигналам.</i>"
@@ -814,7 +960,8 @@ class TelegramNotifier:
             self.answer_callback_query(cb_id, "Убыток зафиксирован. Учтено в статистике качества.", show_alert=True)
             sig = get_signal_by_id(sig_id)
             sl_price = sig["stop_loss"] if sig else 0.0
-            pnl = -abs(sl_price - sig["entry_price"]) if sig else -10.0
+            trade_entry = (sig.get("actual_entry_price") or sig["entry_price"]) if sig else 0.0
+            pnl = -abs(sl_price - trade_entry) if sig else -10.0
             update_signal_status(sig_id, "SL_HIT", sl_price, pnl)
 
             new_text = orig_text + "\n\n🛑 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В УБЫТОК (SL)</b> ⚠️\n<i>Результат записан в статистику винрейта. Бот разблокирован.</i>"

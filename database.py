@@ -108,6 +108,7 @@ def init_db():
                     symbol TEXT NOT NULL,
                     direction TEXT NOT NULL,
                     entry_price REAL NOT NULL,
+                    actual_entry_price REAL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
                     initial_take_profit REAL,
@@ -123,6 +124,7 @@ def init_db():
             """)
             try:
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_price REAL")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
@@ -140,9 +142,13 @@ def init_db():
                     old_stop_loss REAL NOT NULL,
                     new_take_profit REAL NOT NULL,
                     new_stop_loss REAL NOT NULL,
+                    old_actual_entry_price REAL,
+                    new_actual_entry_price REAL,
                     changed_at TEXT NOT NULL
                 )
             """)
+            cursor.execute("ALTER TABLE signal_level_history ADD COLUMN IF NOT EXISTS old_actual_entry_price REAL")
+            cursor.execute("ALTER TABLE signal_level_history ADD COLUMN IF NOT EXISTS new_actual_entry_price REAL")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
 
             cursor.execute("""
@@ -201,6 +207,7 @@ def init_db():
                     symbol TEXT NOT NULL,
                     direction TEXT NOT NULL,
                     entry_price REAL NOT NULL,
+                    actual_entry_price REAL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
                     initial_take_profit REAL,
@@ -219,6 +226,8 @@ def init_db():
                 cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
                 if "message_id" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
+                if "actual_entry_price" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_price REAL")
                 if "entered_at" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
                 if "diagnostic_data" not in cols:
@@ -240,9 +249,17 @@ def init_db():
                     old_stop_loss REAL NOT NULL,
                     new_take_profit REAL NOT NULL,
                     new_stop_loss REAL NOT NULL,
+                    old_actual_entry_price REAL,
+                    new_actual_entry_price REAL,
                     changed_at TEXT NOT NULL
                 )
             """)
+            cursor.execute("PRAGMA table_info(signal_level_history)")
+            history_cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
+            if "old_actual_entry_price" not in history_cols:
+                cursor.execute("ALTER TABLE signal_level_history ADD COLUMN old_actual_entry_price REAL")
+            if "new_actual_entry_price" not in history_cols:
+                cursor.execute("ALTER TABLE signal_level_history ADD COLUMN new_actual_entry_price REAL")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
 
             cursor.execute("""
@@ -546,6 +563,34 @@ def set_signal_entered_at(signal_id: int):
     sql = _adapt_sql("UPDATE signals SET entered_at = ? WHERE id = ?")
     with get_db() as cursor:
         cursor.execute(sql, (now_str, int(signal_id)))
+
+
+def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: float, stop_loss: float) -> bool:
+    """Сохраняет фактический вход и уровни открытой сделки с историей TP/SL."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as cursor:
+        sql = _adapt_sql("SELECT actual_entry_price, take_profit, stop_loss FROM signals WHERE id = ? AND status = 'OPEN'")
+        cursor.execute(sql, (int(signal_id),))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        old_entry = row["actual_entry_price"]
+        old_tp, old_sl = float(row["take_profit"]), float(row["stop_loss"])
+        new_tp, new_sl = float(take_profit), float(stop_loss)
+        update_sql = _adapt_sql("UPDATE signals SET actual_entry_price = ?, take_profit = ?, stop_loss = ? WHERE id = ? AND status = 'OPEN'")
+        cursor.execute(update_sql, (float(entry_price), new_tp, new_sl, int(signal_id)))
+        if cursor.rowcount != 1:
+            return False
+        if old_tp != new_tp or old_sl != new_sl or old_entry is None or float(old_entry) != float(entry_price):
+            history_sql = _adapt_sql("""
+                INSERT INTO signal_level_history
+                    (signal_id, old_take_profit, old_stop_loss, new_take_profit, new_stop_loss,
+                     old_actual_entry_price, new_actual_entry_price, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+            cursor.execute(history_sql, (int(signal_id), old_tp, old_sl, new_tp, new_sl,
+                                         old_entry, float(entry_price), now))
+        return True
 
 
 def get_open_signals() -> List[Dict[str, Any]]:
