@@ -166,7 +166,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                  "entered": bool(entered), "status": "OPEN"}
         payload = {"chat_id": self.chat_id, "html": self._trade_widget_html(), "width": 390,
                    "chat_data": json.dumps(state, separators=(",", ":")), "allow_queries": True,
-                   "caption": self._trade_widget_caption(state)}
+                   "caption": f"📍 Сделка #{signal_id} · {state['symbol']}"}
         if reply_to_message_id:
             payload["reply_parameters"] = {"message_id": int(reply_to_message_id), "allow_sending_without_reply": True}
         try:
@@ -178,18 +178,6 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         except Exception as exc:
             logger.warning("Ошибка sendWidget, использую обычную карточку: %s", exc)
         return None
-
-    @staticmethod
-    def _trade_widget_caption(state: Dict[str, Any]) -> str:
-        """Текстовая подпись оставляет уровни доступными для копирования вне виджета."""
-        status = "В РЫНКЕ" if state.get("entered") else "СИГНАЛ"
-        if state.get("status") != "OPEN":
-            status = str(state["status"])
-        return (
-            f"📍 <b>Сделка #{state['id']} · {state.get('symbol', '')}</b> — {status}\n"
-            f"Вход: <code>{state.get('entry')}</code>  ·  "
-            f"TP: <code>{state.get('tp')}</code>  ·  SL: <code>{state.get('sl')}</code>"
-        )
 
     def _handle_widget_query(self, query: Dict[str, Any]):
         """Проверяет владельца карточки, применяет действие и синхронизирует её состояние."""
@@ -283,13 +271,6 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 if not state_response.ok or not state_response.json().get("ok"):
                     logger.warning("Telegram не обновил состояние виджета для сделки #%s: %s",
                                    sig_id, state_response.text)
-                # Caption остаётся обычным текстом сообщения: цены можно выделить и скопировать.
-                caption_response = requests.post(f"{self.base_url}/editMessageCaption", json={
-                    "chat_id": chat_id, "message_id": msg_id,
-                    "caption": self._trade_widget_caption(state), "parse_mode": "HTML"
-                }, timeout=5)
-                if not caption_response.ok or not caption_response.json().get("ok"):
-                    logger.debug("Подпись виджета сделки #%s не обновлена: %s", sig_id, caption_response.text)
             answer(json.dumps({"message": feedback, "state": state}, ensure_ascii=False, separators=(",", ":")))
         except Exception:
             logger.exception("Ошибка обработки widget_query")
