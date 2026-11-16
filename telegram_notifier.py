@@ -41,7 +41,6 @@ from database import (
     request_retrain,
     set_signal_message_id,
     set_signal_entered_at,
-    update_signal_levels,
     get_signal_level_history,
     update_signal_trade_values,
     set_signal_position_quantity
@@ -131,6 +130,7 @@ class TelegramNotifier:
         self.pending_level_updates: Dict[Any, Dict[str, Any]] = {}
         self._widget_chat_type_checked = False
         self._widget_chat_type: Optional[str] = None
+        self._widget_retry_after = 0.0
 
     @staticmethod
     def _trade_markup(signal_id: int) -> Dict:
@@ -139,7 +139,7 @@ class TelegramNotifier:
                 {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{signal_id}"},
                 {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{signal_id}"}
             ],
-            [{"text": "✏️ Изменить TP/SL", "callback_data": f"levels_{signal_id}"}],
+            [{"text": "✏️ Изменить Entry/TP/SL", "callback_data": f"levels_{signal_id}"}],
             [{"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{signal_id}"}]
         ]}
 
@@ -165,6 +165,10 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
     def _send_trade_widget(self, signal_id: int, symbol: str, direction: str, entry: float,
                            tp: float, sl: float, reply_to_message_id: Optional[int] = None,
                            entered: bool = False, actual_entry: Optional[float] = None) -> Optional[int]:
+        # Telegram currently rejects widgets for general bots. Keep ordinary cards working
+        # and retry occasionally in case server-side eligibility changes.
+        if time.time() < self._widget_retry_after:
+            return None
         state = {"id": int(signal_id), "symbol": SYMBOL_NAMES.get(symbol, symbol), "direction": direction.upper(), "quantity": None,
                  "reference": float(entry), "entry": float(actual_entry if actual_entry is not None else entry), "tp": float(tp), "sl": float(sl),
                  "entered": bool(entered), "status": "OPEN"}
@@ -179,6 +183,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             if response.ok and data.get("ok"):
                 return data["result"]["message_id"]
             if data.get("description") == "Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED":
+                self._widget_retry_after = time.time() + 3600
                 chat_type = self._probe_widget_chat_type()
                 if chat_type == "private":
                     hint = "чат личный; проверьте доступность функции для бота на стороне Telegram"
@@ -343,16 +348,20 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
     @staticmethod
     def _parse_trade_levels(text: str):
-        tp_match = re.search(r"\bTP\s*[:= ]\s*(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
-        sl_match = re.search(r"\bSL\s*[:= ]\s*(-?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+        number = r"(-?\d+(?:[.,]\d+)?)"
+        entry_match = re.search(rf"\b(?:ENTRY|ВХОД)\s*[:= ]\s*{number}", text, re.IGNORECASE)
+        tp_match = re.search(rf"\bTP\s*[:= ]\s*{number}", text, re.IGNORECASE)
+        sl_match = re.search(rf"\bSL\s*[:= ]\s*{number}", text, re.IGNORECASE)
         if not tp_match or not sl_match:
             return None
         try:
+            entry = float(entry_match.group(1).replace(",", ".")) if entry_match else None
             tp = float(tp_match.group(1).replace(",", "."))
             sl = float(sl_match.group(1).replace(",", "."))
-            if not math.isfinite(tp) or not math.isfinite(sl):
+            if ((entry is not None and (not math.isfinite(entry) or entry <= 0))
+                    or not math.isfinite(tp) or tp <= 0 or not math.isfinite(sl) or sl <= 0):
                 return None
-            return tp, sl
+            return entry, tp, sl
         except ValueError:
             return None
 
@@ -414,19 +423,19 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
         # Не перехватываем обычные команды/кнопки Telegram, пока ожидаем уровни.
         # Обрабатываем здесь только сообщения, похожие на ввод TP или SL.
-        looks_like_level_input = re.search(r"\b(?:TP|SL)\b", message_text, re.IGNORECASE)
+        looks_like_level_input = re.search(r"\b(?:ENTRY|TP|SL|ВХОД)\b", message_text, re.IGNORECASE)
         if not looks_like_level_input:
             return False
 
         parsed = self._parse_trade_levels(message_text)
         if not parsed:
             self.send_raw_message(
-                "Не удалось распознать оба уровня. Отправьте одним сообщением, например: <code>TP=4120 SL=4090</code>.",
+                "Не удалось распознать цены. Отправьте <code>ENTRY=4120 TP=4130 SL=4090</code> или только <code>TP=4130 SL=4090</code>.",
                 reply_to_message_id=msg.get("message_id")
             )
             return True
 
-        tp, sl = parsed
+        requested_entry, tp, sl = parsed
         sig_id = pending["signal_id"]
         sig = get_signal_by_id(sig_id)
         if not sig or sig.get("status") != "OPEN":
@@ -434,27 +443,29 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             self.send_raw_message(f"Сделка #{sig_id} уже закрыта или не найдена. Уровни не изменены.")
             return True
 
-        entry = float(sig["entry_price"])
+        entry = float(requested_entry if requested_entry is not None else
+                      (sig.get("actual_entry_price") or sig["entry_price"]))
         is_buy = str(sig["direction"]).upper() == "BUY"
         valid = (sl < entry < tp) if is_buy else (tp < entry < sl)
         if not valid:
             expected = "SL < вход < TP" if is_buy else "TP < вход < SL"
             self.send_raw_message(
-                f"❌ Получено TP=<code>{tp}</code>, SL=<code>{sl}</code>. Эти уровни не подходят для сделки #{sig_id} ({sig['symbol']}, {sig['direction']}).\n"
+                f"❌ Получено ENTRY=<code>{entry}</code>, TP=<code>{tp}</code>, SL=<code>{sl}</code>. Эти цены не подходят для сделки #{sig_id} ({sig['symbol']}, {sig['direction']}).\n"
                 f"Вход: <code>{entry}</code>; требуется <code>{expected}</code>.\n"
-                f"Введите цены именно для {sig['symbol']}, например: <code>TP={sig['take_profit']} SL={sig['stop_loss']}</code> (текущие уровни).",
+                f"Введите цены именно для {sig['symbol']}, например: <code>ENTRY={entry} TP={sig['take_profit']} SL={sig['stop_loss']}</code>.",
                 reply_to_message_id=msg.get("message_id")
             )
             return True
 
-        if not update_signal_levels(sig_id, tp, sl):
+        if not update_signal_trade_values(sig_id, entry, tp, sl, source="inline_text"):
             self.pending_level_updates.pop(chat_id, None)
             self.send_raw_message(f"Не удалось обновить уровни сделки #{sig_id}: возможно, она уже закрыта.")
             return True
 
         self.pending_level_updates.pop(chat_id, None)
         original_text = pending["card_text"]
-        updated_text = re.sub(r"(🏆 <b>Take Profit:</b> <code>).*?(</code>)", rf"\g<1>{tp}\g<2>", original_text, count=1)
+        updated_text = re.sub(r"(💵 <b>Цена входа:</b> <code>).*?(</code>)", rf"\g<1>{entry}\g<2>", original_text, count=1)
+        updated_text = re.sub(r"(🏆 <b>Take Profit:</b> <code>).*?(</code>)", rf"\g<1>{tp}\g<2>", updated_text, count=1)
         updated_text = re.sub(r"(🛑 <b>Stop Loss:</b> <code>).*?(</code>)", rf"\g<1>{sl}\g<2>", updated_text, count=1)
         history = get_signal_level_history(sig_id)
         history_lines = []
@@ -934,7 +945,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 header = f"📍 <b>КАРТОЧКА ОТКРЫТОЙ СДЕЛКИ: #{sig_id}</b>"
                 footer = (
                     "<i>👆 Нажмите на цитату-ответ вверху этого сообщения, чтобы Telegram перенес вас прямо к первому сигналу!</i>\n\n"
-                    "👇 <b>Либо зафиксируйте результат сделки прямо здесь:</b>"
+                "👇 <b>Либо укажите фактические Entry/TP/SL или результат:</b>"
                 )
                 markup = {
                     "inline_keyboard": [
@@ -942,7 +953,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                             {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{sig_id}"},
                             {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{sig_id}"}
                         ],
-                        [{"text": "✏️ Изменить TP/SL", "callback_data": f"levels_{sig_id}"}],
+                        [{"text": "✏️ Изменить Entry/TP/SL", "callback_data": f"levels_{sig_id}"}],
                         [
                             {"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{sig_id}"}
                         ]
@@ -964,7 +975,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             levels_history_text = ""
             if level_history:
                 history_rows = [
-                    f"• {_utc_to_local_hhmm(item.get('changed_at', ''))}: TP <code>{item['old_take_profit']}</code> → <code>{item['new_take_profit']}</code>; "
+                    f"• {_utc_to_local_hhmm(item.get('changed_at', ''))}: вход <code>{item.get('old_actual_entry_price') or '—'}</code> → <code>{item.get('new_actual_entry_price') or '—'}</code>; "
+                    f"TP <code>{item['old_take_profit']}</code> → <code>{item['new_take_profit']}</code>; "
                     f"SL <code>{item['old_stop_loss']}</code> → <code>{item['new_stop_loss']}</code>"
                     for item in level_history
                 ]
@@ -979,7 +991,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"🏷 <b>Инструмент:</b> <b>{display_name}</b>\n"
                 f"🎯 <b>Направление:</b> {dir_name} {dir_emoji}\n\n"
-                f"💵 <b>Цена входа:</b> <code>{sig.get('entry_price')}</code>\n"
+                    f"💵 <b>Цена входа:</b> <code>{sig.get('actual_entry_price') or sig.get('entry_price')}</code>\n"
+                    f"📝 <b>Вход по сигналу:</b> <code>{sig.get('entry_price')}</code>\n"
                 f"🏆 <b>Take Profit:</b> <code>{sig.get('take_profit')}</code>\n"
                 f"🛑 <b>Stop Loss:</b> <code>{sig.get('stop_loss')}</code>\n"
                 f"{levels_history_text}"
@@ -1014,7 +1027,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             if not sig or sig.get("status") != "OPEN":
                 self.answer_callback_query(cb_id, "Изменять уровни можно только у открытой сделки.", show_alert=True)
                 return
-            self.answer_callback_query(cb_id, "Введите новые TP и SL одним сообщением.", show_alert=False)
+            self.answer_callback_query(cb_id, "Введите фактические Entry, TP и SL либо только TP и SL.", show_alert=False)
             self.pending_level_updates[chat_id] = {
                 "kind": "levels",
                 "signal_id": sig_id,
@@ -1027,8 +1040,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             self.send_raw_message(
                 f"✏️ <b>Новые уровни для сделки #{sig_id}</b>\n"
                 f"Текущий TP: <code>{sig['take_profit']}</code> | SL: <code>{sig['stop_loss']}</code>\n"
-                f"Вход: <code>{sig['entry_price']}</code> ({sig['direction']})\n\n"
-                f"Отправьте оба значения одним сообщением в формате <code>TP={sig['take_profit']} SL={sig['stop_loss']}</code> (это текущие уровни сделки).\n"
+                f"Текущий Entry: <code>{sig.get('actual_entry_price') or sig['entry_price']}</code> ({sig['direction']}); вход по сигналу: <code>{sig['entry_price']}</code>.\n\n"
+                f"Отправьте <code>ENTRY=... TP=... SL=...</code> чтобы изменить все цены, либо <code>TP={sig['take_profit']} SL={sig['stop_loss']}</code> чтобы оставить Entry прежним.\n"
                 "Для BUY: SL ниже входа, TP выше. Для SELL: TP ниже входа, SL выше.\n"
                 "Можно менять уровни снова этой же кнопкой; все изменения сохраняются в истории.",
                 reply_to_message_id=msg_id

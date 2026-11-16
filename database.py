@@ -640,7 +640,8 @@ def set_signal_entered_at(signal_id: int, source: str = "widget"):
             _record_signal_event(cursor, signal_id, "entered", source, {"entry_basis": "signal_reference"})
 
 
-def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: float, stop_loss: float) -> bool:
+def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: float, stop_loss: float,
+                              source: str = "widget") -> bool:
     """Сохраняет фактический вход и уровни открытой сделки с историей TP/SL."""
     now = datetime.utcnow().isoformat()
     with get_db() as cursor:
@@ -652,8 +653,8 @@ def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: 
         old_entry = row["actual_entry_price"]
         old_tp, old_sl = float(row["take_profit"]), float(row["stop_loss"])
         new_tp, new_sl = float(take_profit), float(stop_loss)
-        update_sql = _adapt_sql("UPDATE signals SET actual_entry_price = ?, actual_entry_source = 'user_widget', take_profit = ?, stop_loss = ? WHERE id = ? AND status = 'OPEN'")
-        cursor.execute(update_sql, (float(entry_price), new_tp, new_sl, int(signal_id)))
+        update_sql = _adapt_sql("UPDATE signals SET actual_entry_price = ?, actual_entry_source = ?, take_profit = ?, stop_loss = ? WHERE id = ? AND status = 'OPEN'")
+        cursor.execute(update_sql, (float(entry_price), str(source), new_tp, new_sl, int(signal_id)))
         if cursor.rowcount != 1:
             return False
         if old_tp != new_tp or old_sl != new_sl or old_entry is None or float(old_entry) != float(entry_price):
@@ -665,7 +666,7 @@ def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: 
             """)
             cursor.execute(history_sql, (int(signal_id), old_tp, old_sl, new_tp, new_sl,
                                          old_entry, float(entry_price), now))
-            _record_signal_event(cursor, signal_id, "levels_changed", "widget", {
+            _record_signal_event(cursor, signal_id, "levels_changed", source, {
                 "old_entry": old_entry, "entry": float(entry_price), "old_tp": old_tp,
                 "old_sl": old_sl, "tp": new_tp, "sl": new_sl
             })
