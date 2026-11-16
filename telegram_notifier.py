@@ -94,13 +94,16 @@ def format_efficiency_rating(winrate: float, finished_count: int) -> str:
 def get_main_keyboard(is_paused: bool = False) -> Dict:
     """Возвращает постоянную нативную клавиатуру внизу экрана Telegram."""
     toggle_btn = "▶️ Запустить бота" if is_paused else "⏸ Поставить на паузу"
+    keyboard = [
+        [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
+        [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
+        [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}],
+        [{"text": "🤖 Разбор ИИ"}, {"text": "🩺 Проверка систем"}],
+    ]
+    if MINI_APP_URL.startswith("https://"):
+        keyboard.append([{"text": "📱 Кабинет трейдера", "web_app": {"url": f"{MINI_APP_URL}/miniapp"}}])
     return {
-        "keyboard": [
-            [{"text": "📊 Статус Бота"}, {"text": "📈 Винрейт"}],
-            [{"text": toggle_btn}, {"text": "🧹 Сброс сделок"}],
-            [{"text": "🔄 Переобучить модель"}, {"text": "📄 Логи сделок"}],
-            [{"text": "🤖 Разбор ИИ"}, {"text": "🩺 Проверка систем"}]
-        ],
+        "keyboard": keyboard,
         "resize_keyboard": True,
         "is_persistent": True
     }
@@ -660,6 +663,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             "📊 <b>Отслеживаемые инструменты:</b>\n"
             f"{display_syms}\n\n"
             "📱 <b>Управление ботом доступно кнопками внизу экрана:</b>\n"
+            "• <b>📱 Кабинет трейдера</b> — сделки, уровни, история, статистика, модели и отчёты в Mini App\n"
             "• <b>📊 Статус Бота</b> — текущие цены, последние 5 анализов и открытые сделки\n"
             "• <b>📈 Винрейт</b> — статистика винрейта за день, неделю, месяц, год\n"
             "• <b>⏸ Поставить на паузу</b> — выключайте бота на ночь для экономии ресурсов\n"

@@ -777,6 +777,18 @@ def get_open_signals() -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+def get_recent_signals(limit: int = 500, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return recent signals for the Mini App lists without loading all event histories."""
+    limit = max(1, min(int(limit), 2000))
+    with get_db() as cursor:
+        if status:
+            sql = _adapt_sql("SELECT * FROM signals WHERE status = ? ORDER BY id DESC LIMIT ?")
+            cursor.execute(sql, (str(status), limit))
+        else:
+            cursor.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def update_signal_status(signal_id: int, status: str, exit_price: Optional[float], pnl: float,
                          source: str = "legacy", pnl_basis: str = "price_move_estimate") -> bool:
     """Фиксирует закрытие один раз, сохраняя источник и основу расчёта результата."""
@@ -962,6 +974,20 @@ def get_latest_model_snapshots(include_artifact: bool = True) -> List[Dict[str, 
     with get_db() as cursor:
         cursor.execute(sql)
         return [_decode_model_snapshot(dict(row), include_artifact=include_artifact) for row in cursor.fetchall()]
+
+
+def get_model_snapshots_history(symbol: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return inspectable model versions for Mini App diagnostics, excluding binary artifacts."""
+    limit = max(1, min(int(limit), 500))
+    selection = "id, symbol, captured_at, trained_at, accuracy, samples_count, features_json, weights_json, metadata_json, artifact_sha256"
+    with get_db() as cursor:
+        if symbol:
+            sql = _adapt_sql(f"SELECT {selection} FROM model_snapshots WHERE symbol = ? ORDER BY id DESC LIMIT ?")
+            cursor.execute(sql, (str(symbol), limit))
+        else:
+            cursor.execute(f"SELECT {selection} FROM model_snapshots ORDER BY id DESC LIMIT ?", (limit,))
+        rows = [_decode_model_snapshot(dict(row)) for row in cursor.fetchall()]
+    return rows
 
 
 def get_model_snapshots_by_ids(snapshot_ids: List[int]) -> Dict[int, Dict[str, Any]]:

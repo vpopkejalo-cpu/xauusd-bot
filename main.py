@@ -25,7 +25,7 @@ import logging
 import threading
 import os
 import math
-from http.server import HTTPServer
+from http.server import ThreadingHTTPServer
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -135,7 +135,7 @@ def start_health_server():
     """Запускает HTTP сервер в фоновом потоке для проверки работоспособности облаком."""
     port = int(os.getenv("PORT", "8080"))
     try:
-        server = HTTPServer(("0.0.0.0", port), MiniAppRequestHandler)
+        server = ThreadingHTTPServer(("0.0.0.0", port), MiniAppRequestHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         logger.info(f"Встроенный веб-сервер проверки здоровья запущен на порту {port}")
@@ -183,6 +183,7 @@ def main():
     fetcher = DataFetcher()
     ml_model = TradingMLModel()
     notifier = TelegramNotifier()
+    MiniAppRequestHandler.notifier = notifier
 
     # Запуск фонового слушателя кнопок и команд в Telegram
     notifier.start_polling()
