@@ -125,7 +125,8 @@ def init_db():
                     exit_source TEXT,
                     reported_pnl REAL,
                     reported_pnl_currency TEXT,
-                    message_id BIGINT
+                    message_id BIGINT,
+                    model_snapshot_id INTEGER
                 )
             """)
             try:
@@ -141,6 +142,7 @@ def init_db():
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_stop_loss REAL")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS model_snapshot_id INTEGER")
             except Exception:
                 pass
 
@@ -193,9 +195,13 @@ def init_db():
                     action TEXT NOT NULL,
                     probability REAL NOT NULL,
                     outcome TEXT NOT NULL,
-                    details TEXT
+                    details TEXT,
+                    model_snapshot_id INTEGER,
+                    diagnostics_json TEXT
                 )
             """)
+            cursor.execute("ALTER TABLE analysis_logs ADD COLUMN IF NOT EXISTS model_snapshot_id INTEGER")
+            cursor.execute("ALTER TABLE analysis_logs ADD COLUMN IF NOT EXISTS diagnostics_json TEXT")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -247,7 +253,8 @@ def init_db():
                     exit_source TEXT,
                     reported_pnl REAL,
                     reported_pnl_currency TEXT,
-                    message_id INTEGER
+                    message_id INTEGER,
+                    model_snapshot_id INTEGER
                 )
             """)
             try:
@@ -277,6 +284,8 @@ def init_db():
                     cursor.execute("ALTER TABLE signals ADD COLUMN initial_take_profit REAL")
                 if "initial_stop_loss" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN initial_stop_loss REAL")
+                if "model_snapshot_id" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
             except Exception:
                 pass
 
@@ -333,7 +342,9 @@ def init_db():
                     action TEXT NOT NULL,
                     probability REAL NOT NULL,
                     outcome TEXT NOT NULL,
-                    details TEXT
+                    details TEXT,
+                    model_snapshot_id INTEGER,
+                    diagnostics_json TEXT
                 )
             """)
 
@@ -345,6 +356,43 @@ def init_db():
             """)
             cursor.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('is_paused', 'false')")
 
+        artifact_type = "BYTEA" if IS_POSTGRES else "BLOB"
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS model_snapshots (
+                id {"SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"},
+                symbol TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                trained_at TEXT,
+                accuracy REAL,
+                samples_count INTEGER NOT NULL,
+                features_json TEXT NOT NULL,
+                weights_json TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                artifact_sha256 TEXT NOT NULL,
+                artifact {artifact_type} NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_snapshots_symbol_id ON model_snapshots (symbol, id)")
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS runtime_logs (
+                id {"SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"},
+                created_at TEXT NOT NULL,
+                level TEXT NOT NULL,
+                logger_name TEXT NOT NULL,
+                message TEXT NOT NULL,
+                exception_text TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_logs_time ON runtime_logs (created_at, level)")
+        if not IS_POSTGRES:
+            cursor.execute("PRAGMA table_info(analysis_logs)")
+            analysis_cols = [row[1] for row in cursor.fetchall()]
+            if "model_snapshot_id" not in analysis_cols:
+                cursor.execute("ALTER TABLE analysis_logs ADD COLUMN model_snapshot_id INTEGER")
+            if "diagnostics_json" not in analysis_cols:
+                cursor.execute("ALTER TABLE analysis_logs ADD COLUMN diagnostics_json TEXT")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_logs_model_snapshot ON analysis_logs (model_snapshot_id)")
+
     db_type = "облачной PostgreSQL" if IS_POSTGRES else "локальной SQLite"
     logger.info(f"База данных ({db_type}) успешно инициализирована.")
 
@@ -355,12 +403,16 @@ def log_candle_analysis(
     action: str,
     probability: float,
     outcome: str,
-    details: str = ""
+    details: str = "",
+    model_snapshot_id: Optional[int] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ):
     """Записывает результат каждого проведенного анализа свечи."""
     sql = _adapt_sql("""
-        INSERT INTO analysis_logs (created_at, symbol, close_price, action, probability, outcome, details)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO analysis_logs (
+            created_at, symbol, close_price, action, probability, outcome, details,
+            model_snapshot_id, diagnostics_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     with get_db() as cursor:
         cursor.execute(sql, (
@@ -370,7 +422,9 @@ def log_candle_analysis(
             str(action),
             float(probability),
             str(outcome),
-            str(details)
+            str(details),
+            int(model_snapshot_id) if model_snapshot_id is not None else None,
+            json.dumps(diagnostics or {}, ensure_ascii=False, default=str),
         ))
 
 
@@ -380,6 +434,29 @@ def get_recent_analyses(limit: int = 6) -> List[Dict[str, Any]]:
         cursor.execute(f"SELECT * FROM analysis_logs ORDER BY id DESC LIMIT {limit}")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+def get_analysis_logs(days: int = 1, limit: int = 2500) -> List[Dict[str, Any]]:
+    """Return candle-level decisions with their exact model version and feature context."""
+    from datetime import timedelta
+    since = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00" if days == 1 else (
+        datetime.utcnow() - timedelta(days=max(1, int(days)))
+    ).isoformat()
+    sql = _adapt_sql("SELECT * FROM analysis_logs WHERE created_at >= ? ORDER BY id ASC LIMIT ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (since, int(limit)))
+        rows = [dict(row) for row in cursor.fetchall()]
+    for row in rows:
+        try:
+            row["diagnostics"] = json.loads(row.pop("diagnostics_json", "{}") or "{}")
+        except (TypeError, ValueError):
+            row["diagnostics"] = {}
+    if rows:
+        snapshots = get_model_snapshots_by_ids([row.get("model_snapshot_id") for row in rows])
+        for row in rows:
+            snapshot_id = row.get("model_snapshot_id")
+            row["model_snapshot"] = snapshots.get(int(snapshot_id)) if snapshot_id is not None else None
+    return rows
 
 
 def set_bot_paused(is_paused: bool):
@@ -551,7 +628,8 @@ def save_signal(
     stop_loss: float,
     atr: float,
     probability: float,
-    diagnostic_data: Optional[Dict[str, Any]] = None
+    diagnostic_data: Optional[Dict[str, Any]] = None,
+    model_snapshot_id: Optional[int] = None
 ) -> int:
     """Сохраняет сигнал в базу данных (включая глубокие диагностические данные весов и контекста) и возвращает его ID."""
     diag_json = json.dumps(diagnostic_data, ensure_ascii=False) if diagnostic_data else None
@@ -561,8 +639,9 @@ def save_signal(
             cursor.execute("""
                 INSERT INTO signals (
                     created_at, symbol, direction, entry_price, take_profit, stop_loss,
-                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s)
+                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data,
+                    model_snapshot_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s)
                 RETURNING id
             """, (
                 datetime.utcnow().isoformat(),
@@ -575,7 +654,8 @@ def save_signal(
                 float(stop_loss),
                 float(atr),
                 float(probability),
-                diag_json
+                diag_json,
+                int(model_snapshot_id) if model_snapshot_id is not None else None
             ))
             row = cursor.fetchone()
             signal_id = row["id"] if row else 0
@@ -589,8 +669,9 @@ def save_signal(
             cursor.execute("""
                 INSERT INTO signals (
                     created_at, symbol, direction, entry_price, take_profit, stop_loss,
-                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                    initial_take_profit, initial_stop_loss, atr, probability, status, diagnostic_data,
+                    model_snapshot_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
             """, (
                 datetime.utcnow().isoformat(),
                 str(symbol),
@@ -602,7 +683,8 @@ def save_signal(
                 float(stop_loss),
                 float(atr),
                 float(probability),
-                diag_json
+                diag_json,
+                int(model_snapshot_id) if model_snapshot_id is not None else None
             ))
             signal_id = cursor.lastrowid
             _record_signal_event(cursor, signal_id, "signal_created", "bot", {
@@ -818,6 +900,112 @@ def log_training_run(samples_count: int, accuracy: float, notes: str = ""):
         ))
 
 
+def save_model_snapshot(
+    symbol: str,
+    trained_at: Optional[str],
+    accuracy: float,
+    samples_count: int,
+    features: List[str],
+    weights: Dict[str, Any],
+    metadata: Dict[str, Any],
+    artifact_sha256: str,
+    artifact: bytes,
+) -> int:
+    """Persist both the exact model artifact and a human-readable weight snapshot."""
+    sql = _adapt_sql("""
+        INSERT INTO model_snapshots (
+            symbol, captured_at, trained_at, accuracy, samples_count,
+            features_json, weights_json, metadata_json, artifact_sha256, artifact
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """)
+    with get_db() as cursor:
+        cursor.execute(sql, (
+            str(symbol), datetime.utcnow().isoformat(), trained_at,
+            float(accuracy), int(samples_count),
+            json.dumps(features, ensure_ascii=False),
+            json.dumps(weights, ensure_ascii=False, default=str, allow_nan=False),
+            json.dumps(metadata, ensure_ascii=False, default=str, allow_nan=False),
+            str(artifact_sha256), bytes(artifact),
+        ))
+        if IS_POSTGRES:
+            cursor.execute("SELECT LASTVAL() AS id")
+            row = cursor.fetchone()
+            return int(row["id"])
+        return int(cursor.lastrowid)
+
+
+def _decode_model_snapshot(row: Dict[str, Any], include_artifact: bool = False) -> Dict[str, Any]:
+    snapshot = dict(row)
+    for key in ("features_json", "weights_json", "metadata_json"):
+        try:
+            snapshot[key.removesuffix("_json")] = json.loads(snapshot.pop(key) or "{}")
+        except (TypeError, ValueError):
+            snapshot[key.removesuffix("_json")] = {}
+    if include_artifact and snapshot.get("artifact") is not None:
+        snapshot["artifact"] = bytes(snapshot["artifact"])
+    else:
+        snapshot.pop("artifact", None)
+    return snapshot
+
+
+def get_latest_model_snapshots(include_artifact: bool = True) -> List[Dict[str, Any]]:
+    """Return the newest durable model version for each symbol."""
+    artifact_column = ", s.artifact" if include_artifact else ""
+    sql = f"""
+        SELECT s.id, s.symbol, s.captured_at, s.trained_at, s.accuracy, s.samples_count,
+               s.features_json, s.weights_json, s.metadata_json, s.artifact_sha256{artifact_column}
+        FROM model_snapshots s
+        JOIN (SELECT symbol, MAX(id) AS latest_id FROM model_snapshots GROUP BY symbol) latest
+          ON latest.latest_id = s.id
+        ORDER BY s.id ASC
+    """
+    with get_db() as cursor:
+        cursor.execute(sql)
+        return [_decode_model_snapshot(dict(row), include_artifact=include_artifact) for row in cursor.fetchall()]
+
+
+def get_model_snapshots_by_ids(snapshot_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Load report-safe model metadata and weights for the referenced snapshots."""
+    ids = sorted({int(snapshot_id) for snapshot_id in snapshot_ids if snapshot_id is not None})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    sql = _adapt_sql(f"""
+        SELECT id, symbol, captured_at, trained_at, accuracy, samples_count,
+               features_json, weights_json, metadata_json, artifact_sha256
+        FROM model_snapshots WHERE id IN ({placeholders})
+    """)
+    with get_db() as cursor:
+        cursor.execute(sql, ids)
+        rows = [_decode_model_snapshot(dict(row)) for row in cursor.fetchall()]
+    return {int(row["id"]): row for row in rows}
+
+
+def save_runtime_log(level: str, logger_name: str, message: str, exception_text: str = ""):
+    """Persist warning/error diagnostics without interrupting the bot on logging failures."""
+    sql = _adapt_sql("""
+        INSERT INTO runtime_logs (created_at, level, logger_name, message, exception_text)
+        VALUES (?, ?, ?, ?, ?)
+    """)
+    with get_db() as cursor:
+        cursor.execute(sql, (
+            datetime.utcnow().isoformat(), str(level)[:20], str(logger_name)[:255],
+            str(message)[:10_000], str(exception_text)[:20_000] or None,
+        ))
+
+
+def get_runtime_logs(days: int = 1, limit: int = 200) -> List[Dict[str, Any]]:
+    from datetime import timedelta
+    since = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00" if days == 1 else (
+        datetime.utcnow() - timedelta(days=max(1, int(days)))
+    ).isoformat()
+    sql = _adapt_sql("SELECT * FROM runtime_logs WHERE created_at >= ? ORDER BY id DESC LIMIT ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (since, int(limit)))
+        rows = [dict(row) for row in cursor.fetchall()]
+    return list(reversed(rows))
+
+
 def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, Any]]:
     """
     Возвращает список сигналов для формирования глубокого диагностического отчета.
@@ -874,6 +1062,11 @@ def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, An
             by_id[int(history["signal_id"])]["level_history"].append(history)
         for row in rows:
             row.update(by_id[int(row["id"])])
+
+        snapshots = get_model_snapshots_by_ids([row.get("model_snapshot_id") for row in rows])
+        for row in rows:
+            snapshot_id = row.get("model_snapshot_id")
+            row["model_snapshot"] = snapshots.get(int(snapshot_id)) if snapshot_id is not None else None
 
     return rows
 

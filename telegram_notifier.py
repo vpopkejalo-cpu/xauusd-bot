@@ -1271,6 +1271,12 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                         filename=report_data["csv_filename"],
                         caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
                     )
+                if report_data.get("analysis_csv_content"):
+                    self.send_document(
+                        file_content=report_data["analysis_csv_content"],
+                        filename=report_data["analysis_csv_filename"],
+                        caption="🧭 <i>Журнал всех решений по свечам: признаки, фильтры, причины и версия ML-модели</i>"
+                    )
 
                 # Автоматически отправляем рецензию AI-Аналитика
                 try:
@@ -1343,6 +1349,12 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                         file_content=report_data["csv_content"],
                         filename=report_data["csv_filename"],
                         caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
+                    )
+                if report_data.get("analysis_csv_content"):
+                    self.send_document(
+                        file_content=report_data["analysis_csv_content"],
+                        filename=report_data["analysis_csv_filename"],
+                        caption="🧭 <i>Журнал всех решений по свечам: признаки, фильтры, причины и версия ML-модели</i>"
                     )
 
                 # Автоматически отправляем рецензию AI-Аналитика

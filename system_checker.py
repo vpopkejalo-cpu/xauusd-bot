@@ -369,12 +369,14 @@ def _check_database() -> Dict[str, Any]:
             signals_cnt = cur.fetchone()["cnt"]
             cur.execute("SELECT COUNT(*) as cnt FROM signals WHERE status = 'OPEN'")
             open_cnt = cur.fetchone()["cnt"]
+            cur.execute("SELECT COUNT(*) as cnt FROM model_snapshots")
+            model_snapshots_cnt = cur.fetchone()["cnt"]
         latency = int((time.time() - t0) * 1000)
         db_name = "PostgreSQL (Cloud)" if IS_POSTGRES else "SQLite (Local)"
         return {
             "status": "OK",
             "title": "База данных",
-            "message": f"{db_name} ({latency} мс) | Свечей: {candles_cnt} | Сделок: {signals_cnt} (в рынке: {open_cnt})",
+            "message": f"{db_name} ({latency} мс) | Свечей: {candles_cnt} | Сделок: {signals_cnt} (в рынке: {open_cnt}) | Снимков ML-весов: {model_snapshots_cnt}",
             "icon": "🟢"
         }
     except Exception as e:
@@ -422,7 +424,8 @@ def _check_ml_and_weights() -> List[Dict[str, Any]]:
                     "top_bull": top_bull,
                     "top_bear": top_bear,
                     "status_str": status_str,
-                    "weights_count": len(coefs)
+                    "weights_count": len(coefs),
+                    "snapshot_id": ml.model_snapshot_ids.get(sym),
                 })
             except Exception as ex:
                 results.append({
@@ -519,7 +522,7 @@ def run_full_system_check() -> Dict[str, Any]:
             icon = ml_info["icon"]
             lines.append(
                 f"{icon} <b>[{sym}]</b>: Точность {acc_str} ({samples} св.)\n"
-                f"   • Веса активны (всего {ml_info['weights_count']} признаков, bias: {ml_info['intercept']:+.2f})\n"
+                f"   • Веса активны (признаков: {ml_info['weights_count']}, bias: {ml_info['intercept']:+.2f}; снимок БД: #{ml_info['snapshot_id'] or 'нет'})\n"
                 f"   • 🐂 <b>Бычий драйвер:</b> <code>{bull_name} ({bull_w:+.3f})</code>\n"
                 f"   • 🐻 <b>Медвежий драйвер:</b> <code>{bear_name} ({bear_w:+.3f})</code>"
             )

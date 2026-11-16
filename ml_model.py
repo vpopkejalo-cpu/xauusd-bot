@@ -14,10 +14,14 @@ import os
 import re
 import logging
 import joblib
+import io
+import hashlib
+import hmac
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Dict, Any
 from pathlib import Path
+from datetime import datetime, timezone
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -26,7 +30,7 @@ from sklearn.metrics import accuracy_score
 
 from config import MODEL_PATH, MODELS_DIR, MIN_PROBABILITY
 from risk_manager import get_asset_profile
-from database import log_training_run
+from database import log_training_run, save_model_snapshot, get_latest_model_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,9 @@ class TradingMLModel:
         self.models: Dict[str, Pipeline] = {}
         self.accuracies: Dict[str, float] = {}
         self.samples_counts: Dict[str, int] = {}
+        self.model_snapshot_ids: Dict[str, int] = {}
+        self.model_snapshot_hashes: Dict[str, str] = {}
+        self.model_trained_at: Dict[str, Optional[str]] = {}
 
         # Общие атрибуты для обратной совместимости
         self.pipeline: Optional[Pipeline] = None
@@ -84,83 +91,148 @@ class TradingMLModel:
         return self.models_dir / f"model_{safe_sym}.joblib"
 
     def load_all_models(self) -> int:
-        """Загружает все доступные модели из директории models/."""
-        loaded_count = 0
-        if not self.models_dir.exists():
-            return 0
+        """Load local caches, then restore authoritative models from the database."""
+        if self.models_dir.exists():
+            for file_path in self.models_dir.glob("model_*.joblib"):
+                try:
+                    data = joblib.load(file_path)
+                    symbol, pipeline = data.get("symbol", ""), data.get("pipeline")
+                    if not symbol or pipeline is None:
+                        continue
+                    self.models[symbol] = pipeline
+                    self.accuracies[symbol] = float(data.get("accuracy", 0.0))
+                    self.samples_counts[symbol] = int(data.get("samples_count", 0))
+                    self.model_trained_at[symbol] = data.get("trained_at")
+                    logger.info("Загружена локальная модель %s: CV %.1f%%, образцов %s", symbol,
+                                self.accuracies[symbol] * 100, self.samples_counts[symbol])
+                except Exception as exc:
+                    logger.warning("Не удалось загрузить модель %s: %s", file_path, exc)
 
-        for file_path in self.models_dir.glob("model_*.joblib"):
-            try:
-                data = joblib.load(file_path)
-                sym = data.get("symbol", "")
-                pipe = data.get("pipeline")
-                acc = float(data.get("accuracy", 0.0))
-                cnt = int(data.get("samples_count", 0))
-
-                if sym and pipe:
-                    self.models[sym] = pipe
-                    self.accuracies[sym] = acc
-                    self.samples_counts[sym] = cnt
-                    loaded_count += 1
-                    logger.info(f"Загружена модель для {sym}: точность CV {acc:.1%}, образцов {cnt}")
-            except Exception as e:
-                logger.warning(f"Не удалось загрузить модель {file_path}: {e}")
-
-        # Для совместимости: если есть модель для XAU/USD, делаем ее дефолтной
-        if "XAU/USD" in self.models:
-            self.pipeline = self.models["XAU/USD"]
-            self.is_trained = True
-            self.last_accuracy = self.accuracies.get("XAU/USD", 0.0)
-            self.samples_count = self.samples_counts.get("XAU/USD", 0)
-        elif self.models:
-            # Берем первую доступную
-            first_sym = next(iter(self.models))
-            self.pipeline = self.models[first_sym]
-            self.is_trained = True
-            self.last_accuracy = self.accuracies.get(first_sym, 0.0)
-            self.samples_count = self.samples_counts.get(first_sym, 0)
-        elif os.path.exists(MODEL_PATH):
-            # Резервная загрузка старого монолитного файла, если есть
+        if not self.models and os.path.exists(MODEL_PATH):
             try:
                 data = joblib.load(MODEL_PATH)
-                self.pipeline = data.get("pipeline")
-                self.is_trained = True
-                self.last_accuracy = float(data.get("accuracy", 0.0))
-                self.samples_count = int(data.get("samples_count", 0))
-            except Exception:
-                pass
+                symbol, pipeline = data.get("symbol", "XAU/USD"), data.get("pipeline")
+                if pipeline is not None:
+                    self.models[symbol] = pipeline
+                    self.accuracies[symbol] = float(data.get("accuracy", 0.0))
+                    self.samples_counts[symbol] = int(data.get("samples_count", 0))
+                    self.model_trained_at[symbol] = data.get("trained_at")
+            except Exception as exc:
+                logger.warning("Не удалось загрузить legacy ML модель: %s", exc)
 
-        return loaded_count
-
-    def save_symbol_model(self, symbol: str, pipeline: Pipeline, accuracy: float, samples_count: int):
-        """Сохраняет обученную модель конкретного актива на диск."""
+        # Render's local filesystem can be ephemeral; the newest DB artifact is authoritative.
         try:
-            path = self.get_model_path(symbol)
-            data = {
-                "symbol": symbol,
-                "pipeline": pipeline,
-                "accuracy": float(accuracy),
-                "samples_count": int(samples_count),
-                "features": FEATURE_COLUMNS
-            }
-            joblib.dump(data, path)
+            for snapshot in get_latest_model_snapshots(include_artifact=True):
+                artifact = snapshot.get("artifact")
+                if not artifact:
+                    continue
+                expected = str(snapshot.get("artifact_sha256") or "")
+                actual = hashlib.sha256(artifact).hexdigest()
+                if not expected or not hmac.compare_digest(expected, actual):
+                    logger.error("Хэш снимка модели %s не совпал; восстановление пропущено", snapshot.get("symbol"))
+                    continue
+                data = joblib.load(io.BytesIO(artifact))
+                symbol, pipeline = str(snapshot["symbol"]), data.get("pipeline")
+                if pipeline is None:
+                    continue
+                self.models[symbol] = pipeline
+                self.accuracies[symbol] = float(snapshot.get("accuracy") or 0.0)
+                self.samples_counts[symbol] = int(snapshot.get("samples_count") or 0)
+                self.model_snapshot_ids[symbol] = int(snapshot["id"])
+                self.model_snapshot_hashes[symbol] = expected
+                self.model_trained_at[symbol] = snapshot.get("trained_at")
+                logger.info("Восстановлена модель %s из БД: snapshot=%s, CV=%.1f%%, samples=%s",
+                            symbol, snapshot["id"], self.accuracies[symbol] * 100, self.samples_counts[symbol])
+        except Exception as exc:
+            logger.warning("Не удалось восстановить снимки ML из БД: %s", exc)
 
-            # Сохраняем также в память
-            self.models[symbol] = pipeline
-            self.accuracies[symbol] = accuracy
-            self.samples_counts[symbol] = samples_count
+        # One-time import of old local models that predate database snapshots.
+        for symbol, pipeline in list(self.models.items()):
+            if not self.model_snapshot_ids.get(symbol):
+                try:
+                    self.save_symbol_model(symbol, pipeline, self.accuracies.get(symbol, 0.0),
+                                           self.samples_counts.get(symbol, 0),
+                                           {"snapshot_reason": "legacy_model_imported_on_startup"},
+                                           self.model_trained_at.get(symbol))
+                except Exception as exc:
+                    logger.error("Не удалось сохранить старую модель %s в БД: %s", symbol, exc)
 
-            # Если это основной актив, обновляем дефолт
-            if symbol == "XAU/USD" or not self.is_trained:
-                self.pipeline = pipeline
-                self.is_trained = True
-                self.last_accuracy = accuracy
-                self.samples_count = samples_count
-                joblib.dump(data, MODEL_PATH)
+        if self.models:
+            default_symbol = "XAU/USD" if "XAU/USD" in self.models else next(iter(self.models))
+            self.pipeline = self.models[default_symbol]
+            self.is_trained = True
+            self.last_accuracy = self.accuracies.get(default_symbol, 0.0)
+            self.samples_count = self.samples_counts.get(default_symbol, 0)
+        return len(self.models)
 
-            logger.info(f"Модель для {symbol} сохранена в {path} ({samples_count} образцов, точность {accuracy:.1%})")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения модели для {symbol}: {e}")
+    @staticmethod
+    def _weight_snapshot(pipeline: Pipeline) -> Dict[str, Any]:
+        scaler = pipeline.named_steps.get("scaler")
+        classifier = pipeline.named_steps.get("classifier")
+        if scaler is None or classifier is None or not hasattr(classifier, "coef_"):
+            raise ValueError("Ожидаются StandardScaler и classifier с coef_")
+        means = np.asarray(scaler.mean_, dtype=float)
+        scales = np.asarray(scaler.scale_, dtype=float)
+        coefficients = np.asarray(classifier.coef_, dtype=float)
+        intercepts = np.asarray(classifier.intercept_, dtype=float)
+        return {
+            "class_order": [int(value) for value in classifier.classes_],
+            "class_names": {"0": "SELL", "1": "BUY"},
+            "features": list(FEATURE_COLUMNS),
+            "standard_scaler": {
+                "mean": means.tolist(), "scale": scales.tolist(),
+                "variance": np.asarray(scaler.var_, dtype=float).tolist(),
+            },
+            "standardized_coefficients": coefficients.tolist(),
+            "standardized_intercepts": intercepts.tolist(),
+            "raw_feature_coefficients": (coefficients / scales).tolist(),
+            "raw_intercepts": (intercepts - np.sum(coefficients * means / scales, axis=1)).tolist(),
+            "interpretation": "Для двух классов положительный коэффициент смещает log-odds к BUY, отрицательный — к SELL; стандартизированный коэффициент показывает эффект сдвига признака на одно стандартное отклонение.",
+        }
+
+    def get_model_snapshot_reference(self, symbol: str) -> Dict[str, Any]:
+        return {"snapshot_id": self.model_snapshot_ids.get(symbol),
+                "sha256": self.model_snapshot_hashes.get(symbol),
+                "trained_at": self.model_trained_at.get(symbol)}
+
+    def save_symbol_model(self, symbol: str, pipeline: Pipeline, accuracy: float, samples_count: int,
+                          training_metadata: Optional[Dict[str, Any]] = None,
+                          trained_at: Optional[str] = None) -> int:
+        """Write model bytes and inspectable parameters to DB before treating it as saved."""
+        metadata = dict(training_metadata or {})
+        data = {"symbol": symbol, "pipeline": pipeline, "accuracy": float(accuracy),
+                "samples_count": int(samples_count), "features": FEATURE_COLUMNS,
+                "trained_at": trained_at, "metadata": metadata}
+        buffer = io.BytesIO()
+        joblib.dump(data, buffer, compress=3)
+        artifact = buffer.getvalue()
+        artifact_hash = hashlib.sha256(artifact).hexdigest()
+        snapshot_id = save_model_snapshot(
+            symbol, trained_at, accuracy, samples_count, FEATURE_COLUMNS,
+            self._weight_snapshot(pipeline), metadata, artifact_hash, artifact,
+        )
+
+        data.update({"snapshot_id": snapshot_id, "artifact_sha256": artifact_hash})
+        try:
+            joblib.dump(data, self.get_model_path(symbol), compress=3)
+        except Exception as exc:
+            logger.warning("Снимок %s сохранён в БД, локальный кеш не записан: %s", symbol, exc)
+        self.models[symbol] = pipeline
+        self.accuracies[symbol] = float(accuracy)
+        self.samples_counts[symbol] = int(samples_count)
+        self.model_snapshot_ids[symbol] = snapshot_id
+        self.model_snapshot_hashes[symbol] = artifact_hash
+        self.model_trained_at[symbol] = trained_at
+        if symbol == "XAU/USD" or not self.is_trained:
+            self.pipeline, self.is_trained = pipeline, True
+            self.last_accuracy, self.samples_count = float(accuracy), int(samples_count)
+            try:
+                joblib.dump(data, MODEL_PATH, compress=3)
+            except Exception as exc:
+                logger.warning("Снимок %s сохранён в БД, legacy-кеш не записан: %s", symbol, exc)
+        logger.info("Снимок модели %s сохранён в БД: id=%s sha256=%s CV=%.1f%% samples=%s",
+                    symbol, snapshot_id, artifact_hash, float(accuracy) * 100, samples_count)
+        return snapshot_id
 
     def prepare_dataset(
         self,
@@ -322,9 +394,36 @@ class TradingMLModel:
             # Обучаем финальную модель актива на всем массиве
             pipeline.fit(X, y)
 
-            # Сохраняем модель
-            self.save_symbol_model(symbol, pipeline, mean_acc, len(X))
-            log_training_run(samples_count=len(X), accuracy=mean_acc, notes=f"Индивидуальная модель {symbol}")
+            training_metadata = {
+                "algorithm": "StandardScaler + LogisticRegression",
+                "feature_columns": list(FEATURE_COLUMNS),
+                "training_start": str(X.index.min()) if len(X.index) else None,
+                "training_end": str(X.index.max()) if len(X.index) else None,
+                "training_rows": int(len(X)),
+                "class_counts": {str(int(k)): int(v) for k, v in y.value_counts().items()},
+                "class_names": {"0": "SELL", "1": "BUY"},
+                "cross_validation": {
+                    "method": "TimeSeriesSplit",
+                    "folds": int(n_splits),
+                    "fold_accuracies": [float(value) for value in accuracies],
+                    "mean_accuracy": float(mean_acc),
+                },
+                "hyperparameters": {
+                    "C": 0.8, "class_weight": "balanced", "max_iter": 1000,
+                    "random_state": 42,
+                },
+            }
+
+            # Commit the reproducible model snapshot before reporting training success.
+            trained_at = datetime.now(timezone.utc).isoformat()
+            snapshot_id = self.save_symbol_model(
+                symbol, pipeline, mean_acc, len(X), training_metadata=training_metadata,
+                trained_at=trained_at,
+            )
+            log_training_run(
+                samples_count=len(X), accuracy=mean_acc,
+                notes=f"Индивидуальная модель {symbol}; snapshot_id={snapshot_id}; CV folds={n_splits}",
+            )
 
             logger.info(f"[{symbol}] Обучение успешно завершено. Образцов: {len(X)}, Точность CV: {mean_acc:.1%}")
             return True

@@ -24,6 +24,7 @@ import signal
 import logging
 import threading
 import os
+import math
 from http.server import HTTPServer
 from datetime import datetime, timezone
 from typing import Optional
@@ -42,7 +43,15 @@ from config import (
     NEWS_FILTER_ENABLED,
     DEMO_MODE,
     KILL_SWITCH_ENABLED,
-    KILL_SWITCH_MAX_DAILY_SIGNALS
+    KILL_SWITCH_MAX_DAILY_SIGNALS,
+    TELEGRAM_BOT_TOKEN,
+    TWELVE_DATA_API_KEY,
+    DATABASE_URL,
+    FINNHUB_API_KEY,
+    NEWS_API_KEY,
+    GROQ_API_KEY,
+    OPENROUTER_API_KEY,
+    GEMINI_API_KEY,
 )
 from database import (
     init_db,
@@ -58,7 +67,8 @@ from database import (
     get_today_symbol_signal_count,
     is_kill_switch_active,
     trigger_kill_switch,
-    reset_kill_switch
+    reset_kill_switch,
+    save_runtime_log,
 )
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
@@ -88,6 +98,37 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("MainBot")
+
+
+def _finite_number(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+class DatabaseRuntimeLogHandler(logging.Handler):
+    """Persist warnings/errors for diagnostics, redacting configured secrets first."""
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.secrets = [secret for secret in (
+            TELEGRAM_BOT_TOKEN, TWELVE_DATA_API_KEY, DATABASE_URL,
+            FINNHUB_API_KEY, NEWS_API_KEY, GROQ_API_KEY,
+            OPENROUTER_API_KEY, GEMINI_API_KEY,
+        ) if secret]
+
+    def emit(self, record):
+        try:
+            message = record.getMessage()
+            exception_text = self.formatter.formatException(record.exc_info) if record.exc_info else ""
+            for secret in self.secrets:
+                message = message.replace(secret, "[REDACTED]")
+                exception_text = exception_text.replace(secret, "[REDACTED]")
+            save_runtime_log(record.levelname, record.name, message, exception_text)
+        except Exception:
+            # Logging must never be able to stop trading or recursively log its own failure.
+            pass
 
 
 def start_health_server():
@@ -133,6 +174,7 @@ def main():
 
     # 2. Инициализация базы данных SQLite
     init_db()
+    logging.getLogger().addHandler(DatabaseRuntimeLogHandler())
 
     # 3. Запуск веб-сервера для удержания облака
     start_health_server()
@@ -245,6 +287,23 @@ def main():
                     close_p = float(latest_candle["close"])
                     atr_val = float(latest_candle.get("atr", close_p * 0.002))
                     adx_val = float(latest_candle.get("adx", 20.0))
+                    model_snapshot_id = ml_model.model_snapshot_ids.get(sym)
+                    candle_diagnostics = {
+                        "candle_timestamp": str(latest_timestamp),
+                        "ohlcv": {
+                            key: _finite_number(latest_candle.get(key))
+                            for key in ("open", "high", "low", "close", "volume")
+                        },
+                        "features": {
+                            key: _finite_number(latest_candle.get(key))
+                            for key in (
+                                "rsi", "dist_ema_21", "dist_ema_50", "dist_ema_200", "ema_trend",
+                                "atr_pct", "adx", "plus_di", "minus_di", "macd", "macd_hist",
+                                "return_1", "return_3", "return_5", "ema_21", "ema_50", "ema_200",
+                                "htf_trend", "atr",
+                            )
+                        },
+                    }
 
                     # Кэшируем котировку для кнопки "📊 Статус Бота"
                     notifier.update_price(sym, close_p)
@@ -258,14 +317,16 @@ def main():
                         allowed, block_reason = check_asset_trading_allowed(sym, candle=latest_candle, check_time=now_utc)
                         if not allowed:
                             logger.info(f"[{sym}] Пропуск: {block_reason}")
-                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Вне сессии / Флэт", block_reason)
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Вне сессии / Флэт", block_reason,
+                                                model_snapshot_id, candle_diagnostics)
                             continue
 
                         # 3.1. ЗАЩИТНЫЙ ТАЙМ-АУТ ПОСЛЕ СЕРИИ СТОПОВ ПО АКТИВУ
                         loss_ok, loss_reason = check_symbol_consecutive_losses(sym, cooldown_minutes=90)
                         if not loss_ok:
                             logger.info(loss_reason)
-                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Тайм-аут актива", loss_reason)
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Тайм-аут актива", loss_reason,
+                                                model_snapshot_id, candle_diagnostics)
                             continue
 
                         # 3.2. MARKET REGIME ENGINE: Определение режима рынка (Тренд vs Флэт)
@@ -276,20 +337,25 @@ def main():
                         max_sym_signals = profile.get("max_signals_per_day", 3)
                         if not DEMO_MODE and sym_signals_today >= max_sym_signals:
                             logger.info(f"[{sym}] Достигнут лимит сигналов на день ({sym_signals_today}/{max_sym_signals}). Отдых.")
-                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит актива", f"{sym_signals_today}/{max_sym_signals} сигналов")
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит актива",
+                                                f"{sym_signals_today}/{max_sym_signals} сигналов",
+                                                model_snapshot_id, candle_diagnostics)
                             continue
 
                         # 5. ОБЩИЙ ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ВСЕГО БОТА (в боевом режиме)
                         if not DEMO_MODE and daily_stats.get("total_signals", 0) >= KILL_SWITCH_MAX_DAILY_SIGNALS:
                             logger.info(f"[{sym}] Достигнут дневной потолок сигналов ({KILL_SWITCH_MAX_DAILY_SIGNALS}).")
-                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит бота", "Защита от овертрейдинга")
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Дневной лимит бота",
+                                                "Защита от овертрейдинга", model_snapshot_id, candle_diagnostics)
                             continue
 
                         # 6. НОВОСТНОЙ ЩИТ (Economic Calendar Shield)
                         news_info = fetch_news_sentiment(sym)
                         if NEWS_FILTER_ENABLED and news_info["shield_active"]:
                             logger.info(f"[{sym}] НОВОСТНОЙ ЩИТ АКТИВЕН: {news_info['shield_reason']}. Блокировка.")
-                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "🛡 Новостной щит", news_info["shield_reason"])
+                            log_candle_analysis(sym, close_p, "HOLD", 0.0, "🛡 Новостной щит",
+                                                news_info["shield_reason"], model_snapshot_id,
+                                                {**candle_diagnostics, "news": news_info})
                             continue
 
                         # 7. ИНДИВИДУАЛЬНЫЙ ML ПРОГНОЗ
@@ -427,6 +493,8 @@ def main():
                                         local_time_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
                                         is_after_17 = False
 
+                                    model_reference = ml_model.get_model_snapshot_reference(sym)
+
                                     diagnostic_payload = {
                                         "symbol": sym,
                                         "direction": action,
@@ -464,6 +532,7 @@ def main():
                                             "return_5": float(latest_candle.get("return_5", 0.0)),
                                         },
                                         "ml_prediction": prediction.get("diagnostics", {}),
+                                        "model_snapshot": model_reference,
                                         "ml_action": action,
                                         "ml_probability": float(prob),
                                         "ml_reason": reason,
@@ -499,7 +568,8 @@ def main():
                                         stop_loss=levels["stop_loss"],
                                         atr=levels["atr"],
                                         probability=prob,
-                                        diagnostic_data=diagnostic_payload
+                                        diagnostic_data=diagnostic_payload,
+                                        model_snapshot_id=model_reference.get("snapshot_id")
                                     )
 
                                     logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} @ {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
@@ -530,7 +600,26 @@ def main():
                                             logger.warning(f"Не удалось связать message_id с сигналом #{sig_id}: {e}")
 
                         # Записываем в журнал анализов для кнопки "📊 Статус Бота"
-                        log_candle_analysis(sym, close_p, action, prob, outcome_label, reason)
+                        prediction_diagnostics = prediction.get("diagnostics", {}) or {}
+                        compact_model_diagnostics = {
+                            key: prediction_diagnostics.get(key)
+                            for key in (
+                                "model_accuracy", "model_reliable", "samples_count",
+                                "buy_probability", "sell_probability", "min_probability",
+                                "intercept", "primary_driver",
+                            )
+                            if key in prediction_diagnostics
+                        }
+                        candle_diagnostics.update({
+                            "market_regime": regime_info,
+                            "news": news_info,
+                            "model_action": prediction.get("action"),
+                            "filtered_action": action,
+                            "model_reason": reason,
+                            "model_diagnostics": compact_model_diagnostics,
+                        })
+                        log_candle_analysis(sym, close_p, action, prob, outcome_label, reason,
+                                            model_snapshot_id, candle_diagnostics)
 
                 except RateLimitError as e:
                     logger.warning(f"[{sym}] Rate limit Twelve Data: {e}. Пауза 10 сек...")

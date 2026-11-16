@@ -15,7 +15,12 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from database import get_signals_for_report
+from database import (
+    get_signals_for_report,
+    get_latest_model_snapshots,
+    get_runtime_logs,
+    get_analysis_logs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,8 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     gen_time_str = local_now.strftime("%Y-%m-%d %H:%M:%S")
 
     signals = get_signals_for_report(days=days, limit=limit)
+    runtime_logs = get_runtime_logs(days=days, limit=250)
+    analysis_rows = get_analysis_logs(days=days, limit=10000)
 
     # Статистика сессии
     total_count = len(signals)
@@ -118,6 +125,8 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append("1. ОБЩИЕ ИТОГИ СЕССИИ:")
     lines.append("-" * 80)
     lines.append(f"• Всего сигналов:        {total_count}")
+    lines.append(f"• Записей свечного анализа с признаками и версией модели: {len(analysis_rows)}")
+    lines.append(f"• Предупреждений / ошибок процесса: {sum(1 for item in runtime_logs if item.get('level') == 'WARNING')} / {sum(1 for item in runtime_logs if item.get('level') in ('ERROR', 'CRITICAL'))}")
     lines.append(f"• Закрыто по Take Profit: {wins} (TP)")
     lines.append(f"• Закрыто по Stop Loss:   {losses} (SL)")
     lines.append(f"• Активно в рынке (OPEN): {open_count}")
@@ -127,6 +136,69 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append("• Денежный результат брокера: не передан")
     lines.append(f"• Изменение цены по инструментам: {format_price_moves(signals)}")
     lines.append("  Это оценка движения цены, не прибыль в валюте счёта.")
+    lines.append("")
+
+    # Preserve the exact model version used for each signal and print inspectable parameters.
+    snapshots_by_id = {}
+    for signal in signals:
+        snapshot = signal.get("model_snapshot")
+        if snapshot and snapshot.get("id") is not None:
+            snapshots_by_id[int(snapshot["id"])] = snapshot
+    # Include each current model too, even on days when that asset issued no signal.
+    try:
+        for snapshot in get_latest_model_snapshots(include_artifact=False):
+            snapshots_by_id[int(snapshot["id"])] = snapshot
+    except Exception as exc:
+        logger.warning("Не удалось добавить текущие веса ML-моделей в отчёт: %s", exc)
+    lines.append("=" * 80)
+    lines.append("2. СОХРАНЁННЫЕ ВЕРСИИ ML-МОДЕЛЕЙ И ИХ ВЕСА:")
+    lines.append("=" * 80)
+    if not snapshots_by_id:
+        lines.append("Для сигналов в выборке снимок весов не найден. Снимки начнут появляться после обновления бота.")
+    for snapshot_id, snapshot in sorted(snapshots_by_id.items()):
+        weights = snapshot.get("weights") or {}
+        metadata = snapshot.get("metadata") or {}
+        features = weights.get("features") or snapshot.get("features") or []
+        coefficients = weights.get("standardized_coefficients") or []
+        coefficient_row = coefficients[0] if coefficients else []
+        lines.append("")
+        lines.append(
+            f"Модель #{snapshot_id} | {snapshot.get('symbol')} | обучение: {snapshot.get('trained_at') or 'время неизвестно'} | "
+            f"CV accuracy: {float(snapshot.get('accuracy') or 0):.1%} | samples: {snapshot.get('samples_count')}"
+        )
+        lines.append(f"   SHA-256 артефакта: {snapshot.get('artifact_sha256') or '—'}")
+        cv = metadata.get("cross_validation") or {}
+        if cv:
+            lines.append(
+                f"   TimeSeriesSplit: folds={cv.get('folds')} | fold accuracy={cv.get('fold_accuracies', [])} | "
+                f"обучающая выборка={metadata.get('training_start')} .. {metadata.get('training_end')}"
+            )
+        if features and coefficient_row:
+            ranked = sorted(zip(features, coefficient_row), key=lambda pair: abs(float(pair[1])), reverse=True)
+            lines.append("   Коэффициенты LogisticRegression (стандартизированные; знак + смещает к BUY, − к SELL):")
+            lines.extend(f"      {feature}: {float(value):+.7f}" for feature, value in ranked)
+            scaler = weights.get("standard_scaler") or {}
+            scales = scaler.get("scale") or []
+            means = scaler.get("mean") or []
+            if len(scales) == len(features) and len(means) == len(features):
+                raw_coef = weights.get("raw_feature_coefficients", [[]])[0]
+                lines.append("   StandardScaler: mean / scale по FEATURE_COLUMNS:")
+                lines.extend(
+                    f"      {feature}: mean={float(mean):+.7g}, scale={float(scale):.7g}, raw_coef={float(raw_coef[i]):+.7g}"
+                    for i, (feature, mean, scale) in enumerate(zip(features, means, scales))
+                )
+        lines.append("   Коэффициенты объясняют вклад признаков модели, но не доказывают причинность результата сделки.")
+    lines.append("")
+
+    lines.append("=" * 80)
+    lines.append("3. СОХРАНЁННЫЕ ПРЕДУПРЕЖДЕНИЯ И ОШИБКИ ПРОЦЕССА:")
+    lines.append("=" * 80)
+    if not runtime_logs:
+        lines.append("За выбранный период предупреждений и ошибок не записано.")
+    for item in runtime_logs:
+        lines.append(f"[{item.get('created_at', '')} UTC] {item.get('level')} · {item.get('logger_name')}: {item.get('message')}")
+        if item.get("exception_text"):
+            lines.append(str(item["exception_text"])[:3000])
     lines.append("")
 
     # Раздел 2: Анализ гипотезы рынка США после 17:00
@@ -157,7 +229,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
     # Раздел 3: Детальный разбор каждой сделки
     lines.append("=" * 80)
-    lines.append("2. ДЕТАЛЬНЫЙ РАЗБОР КАЖДОЙ СДЕЛКИ (DEEP-DIVE):")
+    lines.append("4. ДЕТАЛЬНЫЙ РАЗБОР КАЖДОЙ СДЕЛКИ (DEEP-DIVE):")
     lines.append("=" * 80)
 
     if not signals:
@@ -219,6 +291,14 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             for change in s.get("level_history", []):
                 lines.append(f"   • Уровни [{change.get('changed_at', '')} UTC]: Entry {change.get('old_actual_entry_price')} → {change.get('new_actual_entry_price')}; TP {change.get('old_take_profit')} → {change.get('new_take_profit')}; SL {change.get('old_stop_loss')} → {change.get('new_stop_loss')}")
             lines.append(f"   • Волатильность (ATR): {atr_v:.4f} | Вероятность ML: {prob_v:.1%}")
+            snapshot = s.get("model_snapshot") or {}
+            snapshot_ref = diag.get("model_snapshot") or {}
+            snapshot_id = s.get("model_snapshot_id") or snapshot_ref.get("snapshot_id")
+            if snapshot_id:
+                lines.append(
+                    f"   • Версия модели: #{snapshot_id} | SHA-256: "
+                    f"{snapshot.get('artifact_sha256') or snapshot_ref.get('sha256') or '—'}"
+                )
 
             risk_info = diag.get("risk", {})
             if risk_info:
@@ -298,7 +378,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     # Раздел 4: Рекомендации
     lines.append("")
     lines.append("=" * 80)
-    lines.append("3. РЕКОМЕНДАЦИИ И НАБЛЮДЕНИЯ ПО РЕЗУЛЬТАТАМ ДИАГНОСТИКИ:")
+    lines.append("5. РЕКОМЕНДАЦИИ И НАБЛЮДЕНИЯ ПО РЕЗУЛЬТАТАМ ДИАГНОСТИКИ:")
     lines.append("=" * 80)
     lines.append("1. Сравнивайте результаты по инструменту, направлению, времени и фактическим ценам входа/выхода.")
     lines.append("2. Не трактуйте сумму ценовых изменений по разным инструментам как прибыль в валюте счёта.")
@@ -321,6 +401,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
         "exit_price", "take_profit", "stop_loss", "initial_take_profit", "initial_stop_loss",
         "position_quantity", "reported_pnl", "reported_pnl_currency", "level_history_json", "events_json",
         "atr", "adx", "rsi", "macd_hist", "ml_probability", "min_probability",
+        "model_snapshot_id", "model_snapshot_sha256", "model_weights_json",
         "primary_driver", "news_score", "news_label"
     ]
     csv_writer.writerow(headers)
@@ -338,6 +419,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
         m_ctx = diag.get("market_context") or diag.get("indicators") or {}
         ml_pred = diag.get("ml_prediction") or {}
         news_info = diag.get("news") or {}
+        model_snapshot = s.get("model_snapshot") or {}
 
         csv_writer.writerow([
             s.get("id"),
@@ -370,6 +452,9 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             m_ctx.get("macd_hist", ""),
             s.get("probability"),
             ml_pred.get("min_probability", ""),
+            s.get("model_snapshot_id") or (diag.get("model_snapshot") or {}).get("snapshot_id", ""),
+            model_snapshot.get("artifact_sha256", ""),
+            json.dumps(model_snapshot.get("weights", {}), ensure_ascii=False, default=str),
             ml_pred.get("primary_driver", ""),
             news_info.get("score", ""),
             news_info.get("label", "")
@@ -377,11 +462,38 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
     csv_content = csv_buffer.getvalue()
 
+    analysis_buffer = io.StringIO()
+    analysis_writer = csv.writer(analysis_buffer)
+    analysis_writer.writerow([
+        "analysis_id", "created_at_utc", "symbol", "close_price", "ml_action",
+        "ml_probability", "final_outcome", "reason", "model_snapshot_id",
+        "model_snapshot_sha256", "candle_timestamp", "ohlcv_json", "features_json",
+        "market_regime_json", "news_json", "model_diagnostics_json", "full_diagnostics_json",
+    ])
+    for item in analysis_rows:
+        diagnostics = item.get("diagnostics") or {}
+        snapshot = item.get("model_snapshot") or {}
+        analysis_writer.writerow([
+            item.get("id"), item.get("created_at"), item.get("symbol"), item.get("close_price"),
+            diagnostics.get("model_action", item.get("action")), item.get("probability"),
+            item.get("outcome"), item.get("details"), item.get("model_snapshot_id") or "",
+            snapshot.get("artifact_sha256", ""), diagnostics.get("candle_timestamp", ""),
+            json.dumps(diagnostics.get("ohlcv", {}), ensure_ascii=False, default=str),
+            json.dumps(diagnostics.get("features", {}), ensure_ascii=False, default=str),
+            json.dumps(diagnostics.get("market_regime", {}), ensure_ascii=False, default=str),
+            json.dumps(diagnostics.get("news", {}), ensure_ascii=False, default=str),
+            json.dumps(diagnostics.get("model_diagnostics", {}), ensure_ascii=False, default=str),
+            json.dumps(diagnostics, ensure_ascii=False, default=str),
+        ])
+    analysis_csv_content = analysis_buffer.getvalue()
+
     return {
         "txt_content": txt_content,
         "csv_content": csv_content,
+        "analysis_csv_content": analysis_csv_content,
         "txt_filename": f"diagnostics_{date_str}.txt",
         "csv_filename": f"trades_data_{date_str}.csv",
+        "analysis_csv_filename": f"analysis_data_{date_str}.csv",
         "signals_count": total_count,
         "winrate": winrate,
         "pnl_str": "ценовые изменения — в CSV по инструментам; денежный PnL не передан",
