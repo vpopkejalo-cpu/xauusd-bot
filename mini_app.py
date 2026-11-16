@@ -119,6 +119,28 @@ def _plain_text(markup: str) -> str:
     return html.unescape(re.sub(r"<[^>]*>", "", str(markup or "")))
 
 
+def _parse_user_number(value) -> float:
+    """Accept decimal comma/dot and common thousands separators from user input."""
+    if value is None or isinstance(value, bool):
+        raise ValueError("Число не задано")
+    text = re.sub(r"[\s\u00a0\u202f_'’]", "", str(value).strip())
+    if not text:
+        raise ValueError("Число не задано")
+    if "," in text and "." in text:
+        decimal_separator = "," if text.rfind(",") > text.rfind(".") else "."
+        grouping_separator = "." if decimal_separator == "," else ","
+        text = text.replace(grouping_separator, "")
+        if decimal_separator == ",":
+            text = text.replace(",", ".")
+    elif "," in text:
+        groups = text.split(",")
+        text = "".join(groups[:-1]) + "." + groups[-1]
+    elif text.count(".") > 1:
+        groups = text.split(".")
+        text = "".join(groups[:-1]) + "." + groups[-1]
+    return float(text)
+
+
 class MiniAppRequestHandler(BaseHTTPRequestHandler):
     notifier = None
 
@@ -291,7 +313,7 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
             if action == "quantity":
                 if signal.get("status") != "OPEN":
                     return self._send_json(409, {"error": "Сделка уже закрыта"})
-                quantity = float(payload.get("quantity", 0))
+                quantity = _parse_user_number(payload.get("quantity", 0))
                 if not math.isfinite(quantity) or quantity <= 0 or not set_signal_position_quantity(signal_id, quantity, source="telegram_mini_app"):
                     return self._send_json(400, {"error": "Введите положительный размер позиции"})
                 return self._send_json(200, {"trade": _trade_payload(signal_id), "message": "Размер позиции сохранён"})
@@ -301,11 +323,8 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 intent = payload.get("status")
                 if intent not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
                     return self._send_json(400, {"error": "Выберите результат закрытия"})
-                raw_exit = payload.get("exit_price")
-                if isinstance(raw_exit, str):
-                    raw_exit = raw_exit.replace("\u00a0", "").replace(" ", "").replace(",", ".")
                 try:
-                    exit_price = float(raw_exit)
+                    exit_price = _parse_user_number(payload.get("exit_price"))
                     entry = float(signal.get("actual_entry_price") or signal.get("entry_price") or 0)
                 except (TypeError, ValueError):
                     return self._send_json(400, {"error": "Укажите фактическую цену выхода числом, например 94.66"})
@@ -335,9 +354,9 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
             if signal.get("status") != "OPEN":
                 return self._send_json(409, {"error": "Изменять уровни можно только у открытой сделки"})
 
-            entry = float(payload["entry"])
-            take_profit = float(payload["tp"])
-            stop_loss = float(payload["sl"])
+            entry = _parse_user_number(payload["entry"])
+            take_profit = _parse_user_number(payload["tp"])
+            stop_loss = _parse_user_number(payload["sl"])
             if not all(math.isfinite(value) and value > 0 for value in (entry, take_profit, stop_loss)):
                 return self._send_json(400, {"error": "Все цены должны быть положительными числами"})
             buy = str(signal.get("direction", "BUY")).upper() == "BUY"
