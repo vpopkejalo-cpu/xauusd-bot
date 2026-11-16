@@ -777,15 +777,27 @@ def get_open_signals() -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-def get_recent_signals(limit: int = 500, status: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return recent signals for the Mini App lists without loading all event histories."""
+def get_recent_signals(limit: int = 500, status: Optional[str] = None,
+                       date_from: Optional[str] = None,
+                       date_to_exclusive: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return recent signals for Mini App lists, optionally filtered by UTC creation date."""
     limit = max(1, min(int(limit), 2000))
+    conditions = []
+    params = []
+    if status:
+        conditions.append("status = ?")
+        params.append(str(status))
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(str(date_from))
+    if date_to_exclusive:
+        conditions.append("created_at < ?")
+        params.append(str(date_to_exclusive))
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
+    sql = _adapt_sql(f"SELECT * FROM signals{where} ORDER BY id DESC LIMIT ?")
     with get_db() as cursor:
-        if status:
-            sql = _adapt_sql("SELECT * FROM signals WHERE status = ? ORDER BY id DESC LIMIT ?")
-            cursor.execute(sql, (str(status), limit))
-        else:
-            cursor.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,))
+        cursor.execute(sql, tuple(params))
         return [dict(row) for row in cursor.fetchall()]
 
 

@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import time
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
@@ -171,7 +172,18 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 status = payload.get("status")
                 if status not in (None, "OPEN", "TP_HIT", "SL_HIT", "MANUAL_CLOSE", "SKIPPED", "EXPIRED", "MANUAL_RESET"):
                     return self._send_json(400, {"error": "Неизвестный фильтр сделок"})
-                rows = get_recent_signals(limit=1000, status=status)
+                try:
+                    date_from = date.fromisoformat(payload["date_from"]) if payload.get("date_from") else None
+                    date_to = date.fromisoformat(payload["date_to"]) if payload.get("date_to") else None
+                except (TypeError, ValueError):
+                    return self._send_json(400, {"error": "Введите корректный диапазон дат"})
+                if date_from and date_to and date_from > date_to:
+                    return self._send_json(400, {"error": "Начальная дата позже конечной"})
+                rows = get_recent_signals(
+                    limit=1000, status=status,
+                    date_from=f"{date_from.isoformat()}T00:00:00" if date_from else None,
+                    date_to_exclusive=f"{(date_to + timedelta(days=1)).isoformat()}T00:00:00" if date_to else None,
+                )
                 return self._send_json(200, {"trades": [_signal_summary(row) for row in rows]})
 
             if action == "winrate":
