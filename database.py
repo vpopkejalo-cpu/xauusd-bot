@@ -109,6 +109,8 @@ def init_db():
                     direction TEXT NOT NULL,
                     entry_price REAL NOT NULL,
                     actual_entry_price REAL,
+                    actual_entry_source TEXT,
+                    position_quantity REAL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
                     initial_take_profit REAL,
@@ -119,12 +121,22 @@ def init_db():
                     closed_at TEXT,
                     exit_price REAL,
                     pnl REAL,
+                    pnl_basis TEXT,
+                    exit_source TEXT,
+                    reported_pnl REAL,
+                    reported_pnl_currency TEXT,
                     message_id BIGINT
                 )
             """)
             try:
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_price REAL")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_source TEXT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS position_quantity REAL")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pnl_basis TEXT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_source TEXT")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl REAL")
+                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl_currency TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
                 cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
@@ -150,6 +162,17 @@ def init_db():
             cursor.execute("ALTER TABLE signal_level_history ADD COLUMN IF NOT EXISTS old_actual_entry_price REAL")
             cursor.execute("ALTER TABLE signal_level_history ADD COLUMN IF NOT EXISTS new_actual_entry_price REAL")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS signal_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    signal_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    event_data TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events (signal_id, id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -208,6 +231,8 @@ def init_db():
                     direction TEXT NOT NULL,
                     entry_price REAL NOT NULL,
                     actual_entry_price REAL,
+                    actual_entry_source TEXT,
+                    position_quantity REAL,
                     take_profit REAL NOT NULL,
                     stop_loss REAL NOT NULL,
                     initial_take_profit REAL,
@@ -218,6 +243,10 @@ def init_db():
                     closed_at TEXT,
                     exit_price REAL,
                     pnl REAL,
+                    pnl_basis TEXT,
+                    exit_source TEXT,
+                    reported_pnl REAL,
+                    reported_pnl_currency TEXT,
                     message_id INTEGER
                 )
             """)
@@ -228,6 +257,18 @@ def init_db():
                     cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
                 if "actual_entry_price" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_price REAL")
+                if "actual_entry_source" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_source TEXT")
+                if "position_quantity" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN position_quantity REAL")
+                if "pnl_basis" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN pnl_basis TEXT")
+                if "exit_source" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN exit_source TEXT")
+                if "reported_pnl" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl REAL")
+                if "reported_pnl_currency" not in cols:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl_currency TEXT")
                 if "entered_at" not in cols:
                     cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
                 if "diagnostic_data" not in cols:
@@ -261,6 +302,17 @@ def init_db():
             if "new_actual_entry_price" not in history_cols:
                 cursor.execute("ALTER TABLE signal_level_history ADD COLUMN new_actual_entry_price REAL")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_level_history_signal ON signal_level_history (signal_id, id)")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS signal_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    event_data TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_events_signal ON signal_events (signal_id, id)")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS training_logs (
@@ -526,7 +578,13 @@ def save_signal(
                 diag_json
             ))
             row = cursor.fetchone()
-            return row["id"] if row else 0
+            signal_id = row["id"] if row else 0
+            if signal_id:
+                _record_signal_event(cursor, signal_id, "signal_created", "bot", {
+                    "entry_price": float(entry_price), "take_profit": float(take_profit),
+                    "stop_loss": float(stop_loss), "atr": float(atr), "probability": float(probability)
+                })
+            return signal_id
         else:
             cursor.execute("""
                 INSERT INTO signals (
@@ -546,7 +604,19 @@ def save_signal(
                 float(probability),
                 diag_json
             ))
-            return cursor.lastrowid
+            signal_id = cursor.lastrowid
+            _record_signal_event(cursor, signal_id, "signal_created", "bot", {
+                "entry_price": float(entry_price), "take_profit": float(take_profit),
+                "stop_loss": float(stop_loss), "atr": float(atr), "probability": float(probability)
+            })
+            return signal_id
+
+
+def _record_signal_event(cursor, signal_id: int, event_type: str, source: str, event_data: Dict[str, Any]):
+    sql = _adapt_sql("""INSERT INTO signal_events
+        (signal_id, event_type, source, event_data, created_at) VALUES (?, ?, ?, ?, ?)""")
+    cursor.execute(sql, (int(signal_id), str(event_type), str(source),
+                         json.dumps(event_data, ensure_ascii=False, default=str), datetime.utcnow().isoformat()))
 
 
 def set_signal_message_id(signal_id: int, message_id: int):
@@ -556,13 +626,18 @@ def set_signal_message_id(signal_id: int, message_id: int):
         cursor.execute(sql, (int(message_id), int(signal_id)))
 
 
-def set_signal_entered_at(signal_id: int):
+def set_signal_entered_at(signal_id: int, source: str = "widget"):
     """Записывает момент нажатия кнопки 'Вошел в сделку' (UTC ISO-формат)."""
     from datetime import datetime, timezone
     now_str = datetime.now(timezone.utc).isoformat()
-    sql = _adapt_sql("UPDATE signals SET entered_at = ? WHERE id = ?")
+    sql = _adapt_sql("""UPDATE signals SET entered_at = COALESCE(entered_at, ?),
+        actual_entry_price = COALESCE(actual_entry_price, entry_price),
+        actual_entry_source = COALESCE(actual_entry_source, 'signal_reference')
+        WHERE id = ? AND status = 'OPEN'""")
     with get_db() as cursor:
         cursor.execute(sql, (now_str, int(signal_id)))
+        if cursor.rowcount:
+            _record_signal_event(cursor, signal_id, "entered", source, {"entry_basis": "signal_reference"})
 
 
 def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: float, stop_loss: float) -> bool:
@@ -577,7 +652,7 @@ def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: 
         old_entry = row["actual_entry_price"]
         old_tp, old_sl = float(row["take_profit"]), float(row["stop_loss"])
         new_tp, new_sl = float(take_profit), float(stop_loss)
-        update_sql = _adapt_sql("UPDATE signals SET actual_entry_price = ?, take_profit = ?, stop_loss = ? WHERE id = ? AND status = 'OPEN'")
+        update_sql = _adapt_sql("UPDATE signals SET actual_entry_price = ?, actual_entry_source = 'user_widget', take_profit = ?, stop_loss = ? WHERE id = ? AND status = 'OPEN'")
         cursor.execute(update_sql, (float(entry_price), new_tp, new_sl, int(signal_id)))
         if cursor.rowcount != 1:
             return False
@@ -590,6 +665,24 @@ def update_signal_trade_values(signal_id: int, entry_price: float, take_profit: 
             """)
             cursor.execute(history_sql, (int(signal_id), old_tp, old_sl, new_tp, new_sl,
                                          old_entry, float(entry_price), now))
+            _record_signal_event(cursor, signal_id, "levels_changed", "widget", {
+                "old_entry": old_entry, "entry": float(entry_price), "old_tp": old_tp,
+                "old_sl": old_sl, "tp": new_tp, "sl": new_sl
+            })
+        return True
+
+
+def set_signal_position_quantity(signal_id: int, quantity: float, source: str = "widget") -> bool:
+    """Сохраняет отображаемый брокером размер позиции; единицу измерения не предполагает."""
+    quantity = float(quantity)
+    if quantity <= 0:
+        return False
+    with get_db() as cursor:
+        sql = _adapt_sql("UPDATE signals SET position_quantity = ? WHERE id = ? AND status = 'OPEN'")
+        cursor.execute(sql, (quantity, int(signal_id)))
+        if cursor.rowcount != 1:
+            return False
+        _record_signal_event(cursor, signal_id, "position_quantity_set", source, {"quantity": quantity})
         return True
 
 
@@ -601,32 +694,57 @@ def get_open_signals() -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-def update_signal_status(signal_id: int, status: str, exit_price: float, pnl: float):
-    """Обновляет статус сигнала при закрытии по TP или SL."""
+def update_signal_status(signal_id: int, status: str, exit_price: Optional[float], pnl: float,
+                         source: str = "legacy", pnl_basis: str = "price_move_estimate") -> bool:
+    """Фиксирует закрытие один раз, сохраняя источник и основу расчёта результата."""
     sql = _adapt_sql("""
         UPDATE signals
-        SET status = ?, closed_at = ?, exit_price = ?, pnl = ?
-        WHERE id = ?
+        SET status = ?, closed_at = ?, exit_price = ?, pnl = ?, exit_source = ?, pnl_basis = ?
+        WHERE id = ? AND status = 'OPEN'
     """)
     with get_db() as cursor:
         cursor.execute(sql, (
             str(status),
             datetime.utcnow().isoformat(),
-            float(exit_price),
+            float(exit_price) if exit_price is not None else None,
             float(pnl),
+            str(source),
+            str(pnl_basis),
             int(signal_id)
         ))
+        if cursor.rowcount != 1:
+            return False
+        _record_signal_event(cursor, signal_id, "closed", source, {
+            "status": str(status), "exit_price": float(exit_price) if exit_price is not None else None,
+            "pnl": float(pnl),
+            "pnl_basis": str(pnl_basis)
+        })
+        return True
+
+
+def get_signal_events(signal_id: int) -> List[Dict[str, Any]]:
+    sql = _adapt_sql("SELECT * FROM signal_events WHERE signal_id = ? ORDER BY id ASC")
+    with get_db() as cursor:
+        cursor.execute(sql, (int(signal_id),))
+        rows = [dict(row) for row in cursor.fetchall()]
+    for row in rows:
+        try:
+            row["event_data"] = json.loads(row.get("event_data") or "{}")
+        except (TypeError, ValueError):
+            row["event_data"] = {}
+    return rows
 
 
 def close_all_open_signals(reason: str = "MANUAL_RESET") -> int:
     """Закрывает все незакрытые сигналы, чтобы разблокировать поиск новых точек входа."""
-    sql = _adapt_sql("""
-        UPDATE signals
-        SET status = ?, closed_at = ?
-        WHERE status = 'OPEN'
-    """)
     with get_db() as cursor:
-        cursor.execute(sql, (str(reason), datetime.utcnow().isoformat()))
+        cursor.execute("SELECT id FROM signals WHERE status = 'OPEN'")
+        ids = [int(row["id"]) for row in cursor.fetchall()]
+        sql = _adapt_sql("""UPDATE signals SET status = ?, closed_at = ?, exit_source = ?, pnl_basis = 'none'
+                           WHERE status = 'OPEN'""")
+        cursor.execute(sql, (str(reason), datetime.utcnow().isoformat(), str(reason)))
+        for signal_id in ids:
+            _record_signal_event(cursor, signal_id, "closed", str(reason), {"status": str(reason)})
         return cursor.rowcount
 
 
@@ -670,6 +788,9 @@ def update_signal_levels(signal_id: int, take_profit: float, stop_loss: float) -
             VALUES (?, ?, ?, ?, ?, ?)
         """)
         cursor.execute(history_sql, (int(signal_id), old_tp, old_sl, new_tp, new_sl, now))
+        _record_signal_event(cursor, signal_id, "levels_changed", "legacy_levels_form", {
+            "old_tp": old_tp, "old_sl": old_sl, "tp": new_tp, "sl": new_sl
+        })
         return True
 
 
@@ -730,6 +851,28 @@ def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, An
                 r["diagnostic_data"] = None
         elif not isinstance(diag_raw, dict):
             r["diagnostic_data"] = None
+
+    if rows:
+        ids = [int(r["id"]) for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        with get_db() as cursor:
+            cursor.execute(_adapt_sql(
+                f"SELECT * FROM signal_events WHERE signal_id IN ({placeholders}) ORDER BY id ASC"), ids)
+            event_rows = [dict(row) for row in cursor.fetchall()]
+            cursor.execute(_adapt_sql(
+                f"SELECT * FROM signal_level_history WHERE signal_id IN ({placeholders}) ORDER BY id ASC"), ids)
+            history_rows = [dict(row) for row in cursor.fetchall()]
+        by_id = {signal_id: {"events": [], "level_history": []} for signal_id in ids}
+        for event in event_rows:
+            try:
+                event["event_data"] = json.loads(event.get("event_data") or "{}")
+            except (TypeError, ValueError):
+                event["event_data"] = {}
+            by_id[int(event["signal_id"])]["events"].append(event)
+        for history in history_rows:
+            by_id[int(history["signal_id"])]["level_history"].append(history)
+        for row in rows:
+            row.update(by_id[int(row["id"])])
 
     return rows
 

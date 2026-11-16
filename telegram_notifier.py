@@ -43,7 +43,8 @@ from database import (
     set_signal_entered_at,
     update_signal_levels,
     get_signal_level_history,
-    update_signal_trade_values
+    update_signal_trade_values,
+    set_signal_position_quantity
 )
 
 logger = logging.getLogger(__name__)
@@ -149,19 +150,20 @@ class TelegramNotifier:
 const W=window.TelegramWidget;let s={};try{s=JSON.parse(W.chatData||'{}')}catch(e){};let edit=null,buf='',busy=false,draft={};
 function el(id){return document.getElementById(id)}function req(data){if(busy)return;busy=true;el('toast').textContent='Сохраняю…';W.request(data).then(r=>{let result=r&&r.result;try{let reply=JSON.parse(result);if(reply.state){s=reply.state;render()}result=reply.message||result}catch(e){}el('toast').textContent=result||'Готово';setTimeout(()=>{el('toast').textContent=''},2200)}).catch(e=>{el('toast').textContent='Не удалось: '+(e.code||'повторите');}).finally(()=>busy=false)}
 function copyPrice(key){try{W.copyText(String(s[key]));el('toast').textContent=({entry:'Цена входа',tp:'Take Profit',sl:'Stop Loss'}[key]+' скопирован')}catch(e){el('toast').textContent='Не удалось скопировать цену'}}
-function render(){el('title').textContent='Сделка #'+s.id;el('symbol').textContent=s.symbol||'';el('direction').textContent=(s.direction==='BUY'?'🟢 Покупка':'🔴 Продажа')+' · вход по сигналу '+s.reference;let badge=el('badge'),label='Сигнал',tone='';if(s.status==='OPEN'&&s.entered){label='В рынке';tone='market'}else if(s.status==='TP_HIT'){label='Take Profit';tone='tp'}else if(s.status==='SL_HIT'){label='Stop Loss';tone='sl'}else if(s.status==='MANUAL_CLOSE'){label='Закрыл в ноль';tone='flat'}else if(s.status==='SKIPPED'){label='Пропущено';tone='skip'}else if(s.status!=='OPEN'){label=s.status}badge.textContent=label;badge.className='badge '+tone;el('levels').innerHTML=[[ 'entry',s.entered?'ВХОД':'ВХОД (СИГНАЛ)',s.entry],['tp','TAKE PROFIT',s.tp],['sl','STOP LOSS',s.sl]].map(x=>'<button type="button" class="level" data-price="'+x[0]+'"><div class="label">'+x[1]+' · КОПИРОВАТЬ</div><div class="value">'+x[2]+'</div></button>').join('');[...el('levels').children].forEach(b=>b.onclick=()=>copyPrice(b.getAttribute('data-price')));let a=el('actions');a.innerHTML='';el('editor').style.display='none';if(s.status!=='OPEN')return;
+function render(){el('title').textContent='Сделка #'+s.id;el('symbol').textContent=(s.symbol||'')+(s.quantity?' · размер '+s.quantity:'');el('direction').textContent=(s.direction==='BUY'?'🟢 Покупка':'🔴 Продажа')+' · вход по сигналу '+s.reference;let badge=el('badge'),label='Сигнал',tone='';if(s.status==='OPEN'&&s.entered){label='В рынке';tone='market'}else if(s.status==='TP_HIT'){label='Take Profit';tone='tp'}else if(s.status==='SL_HIT'){label='Stop Loss';tone='sl'}else if(s.status==='MANUAL_CLOSE'){label='Закрыта вручную';tone='flat'}else if(s.status==='SKIPPED'){label='Пропущено';tone='skip'}else if(s.status!=='OPEN'){label=s.status}badge.textContent=label;badge.className='badge '+tone;el('levels').innerHTML=[[ 'entry',s.entered?'ВХОД':'ВХОД (СИГНАЛ)',s.entry],['tp','TAKE PROFIT',s.tp],['sl','STOP LOSS',s.sl]].map(x=>'<button type="button" class="level" data-price="'+x[0]+'"><div class="label">'+x[1]+' · КОПИРОВАТЬ</div><div class="value">'+x[2]+'</div></button>').join('');[...el('levels').children].forEach(b=>b.onclick=()=>copyPrice(b.getAttribute('data-price')));let a=el('actions');a.innerHTML='';el('editor').style.display='none';if(s.status!=='OPEN')return;
 if(!s.entered){a.innerHTML='<button class="btn" id="enter">✅ Вошёл</button><button class="btn secondary" id="skip">⏭ Пропустить</button>';el('enter').onclick=()=>req('e|'+s.id);el('skip').onclick=()=>req('k|'+s.id);return}
-a.innerHTML='<button class="btn secondary wide" id="change">✏️ Изменить вход / TP / SL</button><button class="btn" id="win">🏆 Закрылся по TP</button><button class="btn danger" id="loss">🛑 Закрылся по SL</button><button class="btn secondary wide" id="manual">Закрыть вручную / в 0</button>';el('change').onclick=()=>selectField('entry');el('win').onclick=()=>req('w|'+s.id);el('loss').onclick=()=>req('l|'+s.id);el('manual').onclick=()=>req('m|'+s.id)}
-function selectField(f){edit=f;buf=String(draft[f]===undefined?s[f]:draft[f]);el('actions').style.display='none';el('editor').style.display='block';el('editLabel').textContent='Новое значение: '+({entry:'Фактический вход',tp:'Take Profit',sl:'Stop Loss'}[f]);el('next').textContent=f==='sl'?'Сохранить':'Далее';drawPad()}
+a.innerHTML='<button class="btn secondary wide" id="change">✏️ Изменить вход / TP / SL</button><button class="btn secondary wide" id="quantity">📦 Размер позиции</button><button class="btn" id="win">🏆 Закрыть по TP</button><button class="btn danger" id="loss">🛑 Закрыть по SL</button><button class="btn secondary wide" id="manual">Закрыть вручную</button>';el('change').onclick=()=>selectField('entry');el('quantity').onclick=()=>selectField('quantity');el('win').onclick=()=>beginExit('TP_HIT',s.tp);el('loss').onclick=()=>beginExit('SL_HIT',s.sl);el('manual').onclick=()=>beginExit('MANUAL_CLOSE',s.entry)}
+function beginExit(status,price){draft={closeStatus:status,exit:price};selectField('exit')}
+function selectField(f){edit=f;buf=String(draft[f]===undefined?(s[f]||''):draft[f]);el('actions').style.display='none';el('editor').style.display='block';el('editLabel').textContent='Новое значение: '+({entry:'Фактический вход',tp:'Take Profit',sl:'Stop Loss',exit:'Фактическая цена закрытия',quantity:'Размер позиции по данным брокера'}[f]);el('next').textContent=(f==='sl'||f==='exit'||f==='quantity')?'Сохранить':'Далее';drawPad()}
 function drawPad(){el('readout').textContent=buf||'0';el('pad').innerHTML=['1','2','3','4','5','6','7','8','9','−','0','.','⌫','Очистить'].map(k=>'<button class="btn secondary">'+k+'</button>').join('');[...el('pad').children].forEach(b=>b.onclick=()=>{let k=b.textContent;if(k==='⌫')buf=buf.slice(0,-1);else if(k==='Очистить')buf='';else if(k==='−'&&!buf)buf='-';else if(k==='.'&&!buf.includes('.'))buf+='.';else if(/[0-9]/.test(k))buf+=k;drawPad()})}
-el('cancel').onclick=()=>{draft={};el('editor').style.display='none';el('actions').style.display='grid'};el('next').onclick=()=>{if(!isFinite(Number(buf))||Number(buf)<=0){el('toast').textContent='Введите корректную цену';return}draft[edit]=Number(buf);if(edit==='entry'){selectField('tp');return}if(edit==='tp'){selectField('sl');return}let entry=Number(draft.entry===undefined?s.entry:draft.entry),tp=Number(draft.tp===undefined?s.tp:draft.tp),sl=Number(draft.sl),buy=s.direction==='BUY';if(!(buy?sl<entry&&entry<tp:tp<entry&&entry<sl)){el('toast').textContent='Проверьте порядок Entry / TP / SL';return}let payload=['v',s.id,entry,tp,sl].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload)};
+el('cancel').onclick=()=>{draft={};el('editor').style.display='none';el('actions').style.display='grid'};el('next').onclick=()=>{if(!isFinite(Number(buf))||Number(buf)<=0){el('toast').textContent='Введите положительное число';return}draft[edit]=Number(buf);if(edit==='quantity'){let payload=['q',s.id,draft.quantity].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload);return}if(edit==='exit'){let payload=['c',s.id,draft.closeStatus,draft.exit].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload);return}if(edit==='entry'){selectField('tp');return}if(edit==='tp'){selectField('sl');return}let entry=Number(draft.entry===undefined?s.entry:draft.entry),tp=Number(draft.tp===undefined?s.tp:draft.tp),sl=Number(draft.sl),buy=s.direction==='BUY';if(!(buy?sl<entry&&entry<tp:tp<entry&&entry<sl)){el('toast').textContent='Проверьте порядок Entry / TP / SL';return}let payload=['v',s.id,entry,tp,sl].join('|');draft={};el('editor').style.display='none';el('actions').style.display='grid';req(payload)};
 W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}catch(e){}});render();
 </script></body></html>'''
 
     def _send_trade_widget(self, signal_id: int, symbol: str, direction: str, entry: float,
                            tp: float, sl: float, reply_to_message_id: Optional[int] = None,
                            entered: bool = False, actual_entry: Optional[float] = None) -> Optional[int]:
-        state = {"id": int(signal_id), "symbol": SYMBOL_NAMES.get(symbol, symbol), "direction": direction.upper(),
+        state = {"id": int(signal_id), "symbol": SYMBOL_NAMES.get(symbol, symbol), "direction": direction.upper(), "quantity": None,
                  "reference": float(entry), "entry": float(actual_entry if actual_entry is not None else entry), "tp": float(tp), "sl": float(sl),
                  "entered": bool(entered), "status": "OPEN"}
         payload = {"chat_id": self.chat_id, "html": self._trade_widget_html(), "width": 390,
@@ -210,13 +212,13 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 if sig.get("status") != "OPEN":
                     answer("Эта сделка уже закрыта.")
                     return
-                set_signal_entered_at(sig_id)
+                set_signal_entered_at(sig_id, source="widget")
                 feedback = "Вход отмечен. Можно изменить цены или зафиксировать закрытие."
             elif action == "k":
                 if sig.get("status") != "OPEN":
                     answer("Эта сделка уже закрыта.")
                     return
-                update_signal_status(sig_id, "SKIPPED", 0.0, 0.0)
+                update_signal_status(sig_id, "SKIPPED", None, 0.0, source="widget_skip", pnl_basis="none")
                 feedback = "Сигнал отмечен как пропущенный."
             elif action == "v":
                 if len(parts) != 5 or sig.get("status") != "OPEN":
@@ -234,6 +236,41 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                     answer("Не удалось сохранить: сделка могла закрыться.")
                     return
                 feedback = "Сохранено. Изменение добавлено в историю сделки."
+            elif action == "q":
+                if len(parts) != 3 or sig.get("status") != "OPEN":
+                    answer("Сделка уже закрыта или данные некорректны.")
+                    return
+                quantity = float(parts[2])
+                if not math.isfinite(quantity) or quantity <= 0 or not set_signal_position_quantity(sig_id, quantity):
+                    answer("Введите положительный размер позиции.")
+                    return
+                feedback = "Размер позиции сохранён. Единица указана так, как её показывает брокер."
+            elif action == "c":
+                if len(parts) != 4 or sig.get("status") != "OPEN":
+                    answer("Сделка уже закрыта или данные некорректны.")
+                    return
+                status = parts[2]
+                if status not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
+                    answer("Неизвестный способ закрытия.")
+                    return
+                exit_price = float(parts[3])
+                entry = float(sig.get("actual_entry_price") or sig.get("entry_price") or 0)
+                if not math.isfinite(exit_price) or exit_price <= 0 or entry <= 0:
+                    answer("Проверьте цену выхода.")
+                    return
+                move = exit_price - entry
+                pnl = move if str(sig.get("direction", "BUY")).upper() == "BUY" else -move
+                if status == "TP_HIT" and pnl < 0:
+                    status = "SL_HIT"
+                elif status == "SL_HIT" and pnl > 0:
+                    status = "TP_HIT"
+                source = "widget_exit_confirmed_" + parts[2]
+                if not update_signal_status(sig_id, status, exit_price, pnl,
+                                            source=source,
+                                            pnl_basis="signed_price_move_estimate"):
+                    answer("Результат уже сохранён или сделка закрылась параллельно.")
+                    return
+                feedback = f"Закрытие сохранено. Изменение цены с учётом направления: {pnl:+g}. Это не денежный PnL брокера."
             elif action in ("w", "l", "m"):
                 if sig.get("status") != "OPEN":
                     answer("Результат уже зафиксирован.")
@@ -241,15 +278,15 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 entry = float(sig.get("actual_entry_price") or sig.get("entry_price") or 0)
                 if action == "w":
                     exit_price = float(sig["take_profit"])
-                    pnl = abs(exit_price - entry)
+                    pnl = (exit_price - entry) if str(sig.get("direction", "BUY")).upper() == "BUY" else (entry - exit_price)
                     status = "TP_HIT"
                 elif action == "l":
                     exit_price = float(sig["stop_loss"])
-                    pnl = -abs(exit_price - entry)
+                    pnl = (exit_price - entry) if str(sig.get("direction", "BUY")).upper() == "BUY" else (entry - exit_price)
                     status = "SL_HIT"
                 else:
                     exit_price, pnl, status = entry, 0.0, "MANUAL_CLOSE"
-                update_signal_status(sig_id, status, exit_price, pnl)
+                update_signal_status(sig_id, status, exit_price, pnl, source="widget_legacy_level")
                 feedback = "Результат сделки сохранён."
             else:
                 answer("Неизвестное действие.")
@@ -260,7 +297,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                      "direction": fresh.get("direction", "BUY"), "reference": fresh.get("entry_price"),
                      "entry": fresh.get("actual_entry_price") or fresh.get("entry_price"),
                      "tp": fresh.get("take_profit"), "sl": fresh.get("stop_loss"),
-                     "entered": bool(fresh.get("entered_at")), "status": fresh.get("status", "OPEN")}
+                     "entered": bool(fresh.get("entered_at")), "quantity": fresh.get("position_quantity"),
+                     "status": fresh.get("status", "OPEN")}
             if action == "e":
                 state["entered"] = True
             if chat_id is not None and msg_id is not None:
@@ -300,7 +338,51 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         message_text = msg.get("text", "").strip()
         if message_text.lower() in ("/cancel", "отмена", "отменить"):
             self.pending_level_updates.pop(chat_id, None)
-            self.send_raw_message("Ввод новых TP/SL отменён. Текущие уровни сделки не изменены.")
+            self.send_raw_message("Ожидающий ввод отменён. Сделка не изменена.")
+            return True
+
+        if pending.get("kind") == "close":
+            match = re.fullmatch(r"\s*(?:(?:EXIT|ЦЕНА)\s*[:=]\s*)?([0-9]+(?:[.,][0-9]+)?)\s*", message_text, re.IGNORECASE)
+            if not match:
+                return False
+            exit_price = float(match.group(1).replace(",", "."))
+            sig_id = pending["signal_id"]
+            sig = get_signal_by_id(sig_id)
+            if not sig or sig.get("status") != "OPEN":
+                self.pending_level_updates.pop(chat_id, None)
+                self.send_raw_message(f"Сделка #{sig_id} уже закрыта или не найдена.")
+                return True
+            if not math.isfinite(exit_price) or exit_price <= 0:
+                self.send_raw_message("Введите положительную цену выхода или /cancel.")
+                return True
+            entry = float(sig.get("actual_entry_price") or sig.get("entry_price") or 0)
+            move = exit_price - entry
+            pnl = move if str(sig.get("direction", "BUY")).upper() == "BUY" else -move
+            intent = pending["status"]
+            status = intent
+            if intent == "TP_HIT" and pnl < 0:
+                status = "SL_HIT"
+            elif intent == "SL_HIT" and pnl > 0:
+                status = "TP_HIT"
+            if not update_signal_status(sig_id, status, exit_price, pnl,
+                                        source=f"inline_exit_confirmed_{intent}",
+                                        pnl_basis="signed_price_move_estimate"):
+                self.pending_level_updates.pop(chat_id, None)
+                self.send_raw_message(f"Не удалось закрыть сделку #{sig_id}: результат уже записан.")
+                return True
+            self.pending_level_updates.pop(chat_id, None)
+            label = {"TP_HIT": "Take Profit", "SL_HIT": "Stop Loss", "MANUAL_CLOSE": "Закрыта вручную"}[status]
+            self.edit_message_text(chat_id, pending["message_id"],
+                                   pending["card_text"] + f"\n\n<b>Статус:</b> {label}\nЦена выхода: <code>{exit_price}</code>\nИзменение цены: <code>{pnl:+g}</code> (не денежный PnL брокера)",
+                                   reply_markup=None)
+            if sig.get("message_id") and sig["message_id"] != pending["message_id"]:
+                try:
+                    self.edit_message_text(chat_id, sig["message_id"],
+                                           f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) ЗАКРЫТ — {label}</b>\nЦена выхода: <code>{exit_price}</code>",
+                                           reply_markup=None)
+                except Exception as exc:
+                    logger.debug("Не удалось обновить исходное сообщение сделки #%s: %s", sig_id, exc)
+            self.send_raw_message(f"Сделка #{sig_id} записана. Цена выхода: <code>{exit_price}</code>; изменение цены: <code>{pnl:+g}</code>.")
             return True
 
         # Не перехватываем обычные команды/кнопки Telegram, пока ожидаем уровни.
@@ -907,6 +989,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 return
             self.answer_callback_query(cb_id, "Введите новые TP и SL одним сообщением.", show_alert=False)
             self.pending_level_updates[chat_id] = {
+                "kind": "levels",
                 "signal_id": sig_id,
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -929,7 +1012,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             self.answer_callback_query(cb_id, "Сделка принята! Укажите результат после ее закрытия.", show_alert=False)
             # Фиксируем точное время входа в сделку
             if sig_id:
-                set_signal_entered_at(sig_id)
+                set_signal_entered_at(sig_id, source="inline_button")
             new_text = orig_text + "\n\n<b>Статус:</b> ВЫ В СДЕЛКЕ 🟢\n<i>Когда закроете позицию брокера, нажмите результат:</i>"
             markup = self._trade_markup(sig_id)
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=markup)
@@ -937,72 +1020,29 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         elif action == "skip":
             self.answer_callback_query(cb_id, "Сигнал пропущен вами.", show_alert=False)
             if sig_id:
-                update_signal_status(sig_id, "SKIPPED", 0.0, 0.0)
+                update_signal_status(sig_id, "SKIPPED", None, 0.0, source="inline_skip", pnl_basis="none")
             new_text = orig_text + "\n\n<b>Статус:</b> Сделка пропущена вами ⏭"
             self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
 
-        elif action == "win":
-            self.answer_callback_query(cb_id, "Отлично! Прибыль зафиксирована.", show_alert=True)
+        elif action in ("win", "loss", "manual"):
             sig = get_signal_by_id(sig_id)
-            tp_price = sig["take_profit"] if sig else 0.0
-            trade_entry = (sig.get("actual_entry_price") or sig["entry_price"]) if sig else 0.0
-            pnl = abs(tp_price - trade_entry) if sig else 10.0
-            update_signal_status(sig_id, "TP_HIT", tp_price, pnl)
-
-            new_text = orig_text + "\n\n🎉 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В ПРИБЫЛЬ (TP)!</b> ✅\n<i>Результат учтен в статистике винрейта. Бот готов к новым сигналам.</i>"
-            self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
-
-            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
-                try:
-                    self.edit_message_text(
-                        chat_id,
-                        sig["message_id"],
-                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) ЗАКРЫТ:</b>\n\n🎉 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В ПРИБЫЛЬ (TP)!</b> ✅\n<i>Результат учтен в статистике винрейта.</i>",
-                        reply_markup=None
-                    )
-                except Exception as e:
-                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
-
-        elif action == "loss":
-            self.answer_callback_query(cb_id, "Убыток зафиксирован. Учтено в статистике качества.", show_alert=True)
-            sig = get_signal_by_id(sig_id)
-            sl_price = sig["stop_loss"] if sig else 0.0
-            trade_entry = (sig.get("actual_entry_price") or sig["entry_price"]) if sig else 0.0
-            pnl = -abs(sl_price - trade_entry) if sig else -10.0
-            update_signal_status(sig_id, "SL_HIT", sl_price, pnl)
-
-            new_text = orig_text + "\n\n🛑 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В УБЫТОК (SL)</b> ⚠️\n<i>Результат записан в статистику винрейта. Бот разблокирован.</i>"
-            self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
-
-            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
-                try:
-                    self.edit_message_text(
-                        chat_id,
-                        sig["message_id"],
-                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) ЗАКРЫТ:</b>\n\n🛑 <b>РЕЗУЛЬТАТ: ЗАКРЫТО В УБЫТОК (SL)</b> ⚠️\n<i>Результат записан в статистику винрейта.</i>",
-                        reply_markup=None
-                    )
-                except Exception as e:
-                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
-
-        elif action == "manual":
-            self.answer_callback_query(cb_id, "Сделка закрыта вручную.", show_alert=False)
-            if sig_id:
-                update_signal_status(sig_id, "MANUAL_CLOSE", 0.0, 0.0)
-            new_text = orig_text + "\n\n✖️ <b>РЕЗУЛЬТАТ: Закрыто вручную / Сброшено</b>\n<i>Бот готов к новым сигналам.</i>"
-            self.edit_message_text(chat_id, msg_id, new_text, reply_markup=None)
-
-            sig = get_signal_by_id(sig_id)
-            if sig and sig.get("message_id") and sig["message_id"] != msg_id:
-                try:
-                    self.edit_message_text(
-                        chat_id,
-                        sig["message_id"],
-                        f"🔔 <b>СИГНАЛ #{sig_id} ({sig.get('symbol', '')}) СБРОШЕН:</b>\n\n✖️ <b>Закрыто вручную / Сброшено</b>",
-                        reply_markup=None
-                    )
-                except Exception as e:
-                    logger.debug(f"Не удалось обновить оригинальное сообщение #{sig['message_id']}: {e}")
+            if not sig or sig.get("status") != "OPEN":
+                self.answer_callback_query(cb_id, "Сделка уже закрыта или не найдена.", show_alert=True)
+                return
+            intent = {"win": "TP_HIT", "loss": "SL_HIT", "manual": "MANUAL_CLOSE"}[action]
+            default_exit = sig.get("take_profit") if action == "win" else sig.get("stop_loss") if action == "loss" else (sig.get("actual_entry_price") or sig.get("entry_price"))
+            self.pending_level_updates[chat_id] = {
+                "kind": "close", "signal_id": sig_id, "message_id": msg_id,
+                "card_text": orig_text, "status": intent
+            }
+            self.answer_callback_query(cb_id, "Введите фактическую цену выхода.", show_alert=False)
+            self.send_raw_message(
+                f"💱 Цена выхода для сделки #{sig_id}\n"
+                f"Текущий ориентир: <code>{default_exit}</code>\n\n"
+                "Введите фактическую цену одним числом (или <code>EXIT=...</code>).\n"
+                "Изменение цены будет рассчитано с учётом BUY/SELL; это не PnL в валюте брокера. Для отмены: /cancel.",
+                reply_to_message_id=msg_id
+            )
 
     def _handle_command(self, msg: Dict):
         text = msg.get("text", "").strip()

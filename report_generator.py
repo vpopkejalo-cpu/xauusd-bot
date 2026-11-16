@@ -4,7 +4,7 @@
 - Влияние весов ML модели на каждое решение (Feature Attribution)
 - Разбор сделок по сессиям (до 17:00 vs после 17:00 Кишинёв / сессия США)
 - Новостной фон, экономический календарь и макро-сантимент
-- Как исходы сделок меняют датасет Triple Barrier и веса при переобучении
+- История сигналов, ручных исходов и изменений уровней
 """
 
 import csv
@@ -41,7 +41,7 @@ def _format_local_time(iso_str: Optional[str]) -> Tuple[str, Optional[int]]:
 def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, Any]:
     """
     Генерирует исчерпывающий диагностический пакет:
-    1. txt_content: Подробный текстовый аналитический отчет с таблицами весов и выводами.
+    1. txt_content: Подробный диагностический отчет с таблицами весов и журналом событий.
     2. csv_content: Табличный файл с количественными метриками по всем сделкам.
     3. txt_filename, csv_filename: Имена файлов с текущей датой.
     4. summary_stats: Краткая сводка для сообщения в Telegram.
@@ -62,7 +62,17 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     skipped_count = sum(1 for s in signals if s.get("status") == "SKIPPED")
     finished_count = wins + losses
     winrate = round((wins / finished_count * 100), 1) if finished_count > 0 else 0.0
-    total_pnl = sum((s.get("pnl") or 0.0) for s in signals if s.get("status") in ("TP_HIT", "SL_HIT"))
+    def price_moves_by_symbol(items):
+        moves = {}
+        for item in items:
+            if item.get("status") in ("TP_HIT", "SL_HIT") and item.get("pnl") is not None:
+                symbol = item.get("symbol", "UNKNOWN")
+                moves[symbol] = moves.get(symbol, 0.0) + float(item.get("pnl") or 0.0)
+        return moves
+
+    def format_price_moves(items):
+        moves = price_moves_by_symbol(items)
+        return "; ".join(f"{symbol} {value:+.3f}" for symbol, value in sorted(moves.items())) or "нет закрытых сделок"
 
     # Сравнение: До 17:00 (Европа/утро) vs После 17:00 (Сессия США / вечер)
     day_sigs = []
@@ -107,7 +117,6 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     # Раздел 1: Сводная статистика
     lines.append("1. ОБЩИЕ ИТОГИ СЕССИИ:")
     lines.append("-" * 80)
-    pnl_sign = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
     lines.append(f"• Всего сигналов:        {total_count}")
     lines.append(f"• Закрыто по Take Profit: {wins} (TP)")
     lines.append(f"• Закрыто по Stop Loss:   {losses} (SL)")
@@ -115,21 +124,22 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append(f"• Сброшено вручную:       {manual_count}")
     lines.append(f"• Пропущено (SKIP):       {skipped_count}")
     lines.append(f"• Общий Винрейт:          {winrate}% (по {finished_count} завершенным сделкам)")
-    lines.append(f"• Суммарный PnL:          {pnl_sign} пунктов")
+    lines.append("• Денежный результат брокера: не передан")
+    lines.append(f"• Изменение цены по инструментам: {format_price_moves(signals)}")
+    lines.append("  Это оценка движения цены, не прибыль в валюте счёта.")
     lines.append("")
 
     # Раздел 2: Анализ гипотезы рынка США после 17:00
     lines.append("-" * 80)
     lines.append("🚨 АНАЛИЗ ГИПОТЕЗЫ ВЛИЯНИЯ РЫНКА США (СРАВНЕНИЕ ДО И ПОСЛЕ 17:00 КИШИНЁВА):")
     lines.append("-" * 80)
-    day_pnl_str = f"+{day_pnl:.2f}" if day_pnl >= 0 else f"{day_pnl:.2f}"
-    eve_pnl_str = f"+{eve_pnl:.2f}" if eve_pnl >= 0 else f"{eve_pnl:.2f}"
-
     lines.append(f"☀️ ДНЕВНОЙ ПЕРИОД (до 17:00 Кишинёв — Лондонская сессия и утро):")
-    lines.append(f"   Сигналов: {day_total} | TP: {day_w} | SL: {day_l} | Винрейт: {day_wr}% | PnL: {day_pnl_str} п.")
+    lines.append(f"   Сигналов: {day_total} | TP: {day_w} | SL: {day_l} | Винрейт: {day_wr}%")
+    lines.append(f"   Изменение цены по инструментам: {format_price_moves(day_sigs)}")
     lines.append("")
     lines.append(f"🌙 ВЕЧЕРНИЙ ПЕРИОД (после 17:00 Кишинёв — Сессия США & Уолл-стрит):")
-    lines.append(f"   Сигналов: {eve_total} | TP: {eve_w} | SL: {eve_l} | Винрейт: {eve_wr}% | PnL: {eve_pnl_str} п.")
+    lines.append(f"   Сигналов: {eve_total} | TP: {eve_w} | SL: {eve_l} | Винрейт: {eve_wr}%")
+    lines.append(f"   Изменение цены по инструментам: {format_price_moves(evening_sigs)}")
     lines.append("")
 
     if eve_total > 0 and day_total > 0:
@@ -175,7 +185,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
             lines.append("")
             lines.append("-" * 80)
-            lines.append(f"🎯 СДЕЛКА #{s_id}: [{sym}] Направление: {direction} | Статус: {status} | PnL: {pnl_str}")
+            lines.append(f"🎯 СДЕЛКА #{s_id}: [{sym}] Направление: {direction} | Статус: {status} | Изм. цены: {pnl_str}")
             lines.append(f"   {session_tag}")
             lines.append("-" * 80)
 
@@ -194,7 +204,20 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             prob_v = s.get("probability", 0.0)
 
             lines.append(f"💰 ПАРАМЕТРЫ СДЕЛКИ И РИСКА:")
-            lines.append(f"   • Вход: {entry_p} | TP: {tp_p} | SL: {sl_p} | Выход: {exit_p or '—'}")
+            actual_entry = s.get("actual_entry_price")
+            shown_entry = actual_entry if actual_entry is not None else entry_p
+            lines.append(f"   • Вход по сигналу: {entry_p} | Фактический вход: {shown_entry} ({s.get('actual_entry_source') or 'нет отметки'})")
+            lines.append(f"   • TP: {tp_p} | SL: {sl_p} | Фактический выход: {exit_p if exit_p is not None else '—'} ({s.get('exit_source') or '—'})")
+            lines.append(f"   • Изменение цены с учётом направления: {pnl_str} | Основа: {s.get('pnl_basis') or 'историческая запись без указания'}")
+            if s.get("position_quantity") is not None:
+                lines.append(f"   • Размер позиции (со слов пользователя): {s['position_quantity']}")
+            if s.get("reported_pnl") is not None:
+                lines.append(f"   • PnL брокера: {s['reported_pnl']} {s.get('reported_pnl_currency') or ''}")
+            for event in s.get("events", []):
+                event_data = event.get("event_data") or {}
+                lines.append(f"   • История [{event.get('created_at', '')} UTC] {event.get('event_type')} / {event.get('source')}: {json.dumps(event_data, ensure_ascii=False, default=str)}")
+            for change in s.get("level_history", []):
+                lines.append(f"   • Уровни [{change.get('changed_at', '')} UTC]: Entry {change.get('old_actual_entry_price')} → {change.get('new_actual_entry_price')}; TP {change.get('old_take_profit')} → {change.get('new_take_profit')}; SL {change.get('old_stop_loss')} → {change.get('new_stop_loss')}")
             lines.append(f"   • Волатильность (ATR): {atr_v:.4f} | Вероятность ML: {prob_v:.1%}")
 
             risk_info = diag.get("risk", {})
@@ -258,22 +281,17 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             else:
                 lines.append("   ℹ️ Детальные коэффициенты весов будут доступны для новых сделок, сформированных ботом.")
 
-            # Динамика весов при переобучении (Learning dynamics)
+            # Влияние записанного результата на обучение модели
             lines.append("")
-            lines.append("🔄 ВЛИЯНИЕ ИСХОДА СДЕЛКИ НА ПЕРЕОБУЧЕНИЕ МОДЕЛИ (WEIGHT DYNAMICS):")
+            lines.append("🔄 КАК ИСХОДЫ СДЕЛОК СВЯЗАНЫ С ОБУЧЕНИЕМ МОДЕЛИ:")
             if status == "SL_HIT":
-                lines.append("   • Сделка завершилась убытком (SL).")
-                lines.append("   • В следующем цикле переобучения метод Triple Barrier присвоит этой свече штрафную метку.")
-                lines.append("   • Градиентный спуск снизит веса тех индикаторов, которые ошибочно подтолкнули к входу,")
-                if is_after_17:
-                    lines.append("     а также повысит требования к входу во время американской сессии после 17:00.")
-                else:
-                    lines.append("     скорректировав порог уверенности для аналогичной рыночной структуры.")
+                lines.append("   • В журнале сделка отмечена как SL.")
+                lines.append("   • Событие записано в журнал, но текущий код обучения не использует его как метку сделки.")
             elif status == "TP_HIT":
-                lines.append("   • Сделка закрылась с прибылью (TP).")
-                lines.append("   • Разметка Triple Barrier подтверждает паттерн. Веса признаков-драйверов укрепляются.")
+                lines.append("   • В журнале сделка отмечена как TP.")
+                lines.append("   • Событие записано в журнал, но текущий код обучения не использует его как метку сделки.")
             elif status == "OPEN":
-                lines.append("   • Сделка еще в рынке. Влияние на веса определится в момент фиксации TP или SL.")
+                lines.append("   • Открытая сделка пока не имеет результата; журнал сделки не является входом текущего обучения.")
             else:
                 lines.append(f"   • Статус сделки: {status}. Учтено в статистике.")
 
@@ -282,14 +300,10 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append("=" * 80)
     lines.append("3. РЕКОМЕНДАЦИИ И НАБЛЮДЕНИЯ ПО РЕЗУЛЬТАТАМ ДИАГНОСТИКИ:")
     lines.append("=" * 80)
-    lines.append("1. Рынок США после 17:00 Кишинёва (15:00 GMT / 10:00 NY):")
-    lines.append("   В первые часы после открытия Нью-Йоркской биржи наблюдается высокая активность институционалов,")
-    lines.append("   ложные пробои трендовых линий и расширение торгового спреда брокеров.")
-    lines.append("2. Мониторинг весов:")
-    lines.append("   Если после сбора статистики за 2-3 торговых дня подтвердится перекос убытков на вечерние часы,")
-    lines.append("   рекомендуется:")
-    lines.append("   а) Повысить порог min_probability для вечерних часов (например, с 64% до 72%).")
-    lines.append("   б) Или включить паузу на первые 30-45 минут американской сессии (16:30–17:15).")
+    lines.append("1. Сравнивайте результаты по инструменту, направлению, времени и фактическим ценам входа/выхода.")
+    lines.append("2. Не трактуйте сумму ценовых изменений по разным инструментам как прибыль в валюте счёта.")
+    lines.append("3. Ручные результаты и изменения уровней сохраняются для анализа; текущая ML-модель обучается на рыночных свечах, а не на этих отметках.")
+    lines.append("4. Наблюдаемые связи в малой выборке не устанавливают причину результата и сами по себе не обосновывают изменение стратегии.")
     lines.append("=" * 80)
 
     txt_content = "\n".join(lines)
@@ -301,9 +315,11 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     csv_writer = csv.writer(csv_buffer)
 
     headers = [
-        "id", "symbol", "direction", "status", "pnl",
+        "id", "symbol", "direction", "status", "pnl_price_move_estimate", "pnl_basis", "exit_source",
         "created_at_chisinau", "entered_at_chisinau", "closed_at_chisinau",
-        "is_after_17_chisinau", "entry_price", "exit_price", "take_profit", "stop_loss",
+        "is_after_17_chisinau", "signal_entry_price", "actual_entry_price", "actual_entry_source",
+        "exit_price", "take_profit", "stop_loss", "initial_take_profit", "initial_stop_loss",
+        "position_quantity", "reported_pnl", "reported_pnl_currency", "level_history_json", "events_json",
         "atr", "adx", "rsi", "macd_hist", "ml_probability", "min_probability",
         "primary_driver", "news_score", "news_label"
     ]
@@ -329,14 +345,25 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             s.get("direction"),
             s.get("status"),
             s.get("pnl", 0.0),
+            s.get("pnl_basis", ""),
+            s.get("exit_source", ""),
             created_local,
             entered_local,
             closed_local,
             "YES" if is_after_17 else "NO",
             s.get("entry_price"),
+            s.get("actual_entry_price", ""),
+            s.get("actual_entry_source", ""),
             s.get("exit_price", ""),
             s.get("take_profit"),
             s.get("stop_loss"),
+            s.get("initial_take_profit", ""),
+            s.get("initial_stop_loss", ""),
+            s.get("position_quantity", ""),
+            s.get("reported_pnl", ""),
+            s.get("reported_pnl_currency", ""),
+            json.dumps(s.get("level_history", []), ensure_ascii=False, default=str),
+            json.dumps(s.get("events", []), ensure_ascii=False, default=str),
             s.get("atr"),
             m_ctx.get("adx", ""),
             m_ctx.get("rsi", ""),
@@ -350,8 +377,6 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
     csv_content = csv_buffer.getvalue()
 
-    pnl_str = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
-
     return {
         "txt_content": txt_content,
         "csv_content": csv_content,
@@ -359,7 +384,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
         "csv_filename": f"trades_data_{date_str}.csv",
         "signals_count": total_count,
         "winrate": winrate,
-        "pnl_str": f"{pnl_str} п.",
+        "pnl_str": "ценовые изменения — в CSV по инструментам; денежный PnL не передан",
         "day_signals": day_total,
         "evening_signals": eve_total,
         "day_winrate": day_wr,
