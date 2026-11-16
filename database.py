@@ -535,6 +535,7 @@ def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
     finished = wins + losses
     winrate = round((wins / finished * 100), 1) if finished > 0 else 0.0
     total_pnl = sum((r["pnl"] or 0.0) for r in rows if r["status"] in ("TP_HIT", "SL_HIT"))
+    actual_pnl = _summarize_actual_pnl(rows)
 
     return {
         "period_days": period_days,
@@ -547,7 +548,38 @@ def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
         "open_count": open_count,
         "finished": finished,
         "winrate": winrate,
-        "total_pnl": round(total_pnl, 2)
+        "total_pnl": round(total_pnl, 2),
+        **actual_pnl,
+    }
+
+
+def _summarize_actual_pnl(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize user-entered realized P/L without adding different currencies together."""
+    totals: Dict[str, float] = {}
+    wins = losses = breakeven = 0
+    count = 0
+    for row in rows:
+        amount = row.get("reported_pnl")
+        if amount is None:
+            continue
+        amount = float(amount)
+        currency = str(row.get("reported_pnl_currency") or "USD").upper()
+        totals[currency] = totals.get(currency, 0.0) + amount
+        count += 1
+        if amount > 0:
+            wins += 1
+        elif amount < 0:
+            losses += 1
+        else:
+            breakeven += 1
+    decisive = wins + losses
+    return {
+        "actual_pnl_by_currency": {currency: round(amount, 2) for currency, amount in sorted(totals.items())},
+        "actual_pnl_count": count,
+        "actual_profit_count": wins,
+        "actual_loss_count": losses,
+        "actual_breakeven_count": breakeven,
+        "actual_winrate": round(wins / decisive * 100, 1) if decisive else None,
     }
 
 
@@ -825,6 +857,33 @@ def update_signal_status(signal_id: int, status: str, exit_price: Optional[float
             "status": str(status), "exit_price": float(exit_price) if exit_price is not None else None,
             "pnl": float(pnl),
             "pnl_basis": str(pnl_basis)
+        })
+        return True
+
+
+def set_signal_reported_pnl(signal_id: int, amount: float, currency: str = "USD",
+                            source: str = "mini_app") -> bool:
+    """Store or correct the broker-reported result for an already closed trade."""
+    currency = str(currency).upper()
+    with get_db() as cursor:
+        select_sql = _adapt_sql(
+            "SELECT status, reported_pnl, reported_pnl_currency FROM signals WHERE id = ?"
+        )
+        cursor.execute(select_sql, (int(signal_id),))
+        row = cursor.fetchone()
+        if not row or row["status"] not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
+            return False
+        old_amount = row["reported_pnl"]
+        old_currency = row["reported_pnl_currency"]
+        update_sql = _adapt_sql(
+            "UPDATE signals SET reported_pnl = ?, reported_pnl_currency = ? WHERE id = ?"
+        )
+        cursor.execute(update_sql, (float(amount), currency, int(signal_id)))
+        if cursor.rowcount != 1:
+            return False
+        _record_signal_event(cursor, signal_id, "actual_pnl_recorded", source, {
+            "old_amount": old_amount, "old_currency": old_currency,
+            "amount": float(amount), "currency": currency,
         })
         return True
 
@@ -1145,6 +1204,7 @@ def get_today_signal_stats() -> Dict[str, Any]:
     for r in rows:
         sym = r.get("symbol", "UNKNOWN")
         by_symbol[sym] = by_symbol.get(sym, 0) + 1
+    actual_pnl = _summarize_actual_pnl(rows)
 
     return {
         "today_date": datetime.utcnow().strftime("%Y-%m-%d"),
@@ -1158,7 +1218,8 @@ def get_today_signal_stats() -> Dict[str, Any]:
         "winrate": winrate,
         "net_pnl": round(net_pnl, 2),
         "consecutive_losses": consecutive_losses,
-        "by_symbol": by_symbol
+        "by_symbol": by_symbol,
+        **actual_pnl,
     }
 
 

@@ -33,6 +33,7 @@ from database import (
     set_bot_paused,
     set_signal_entered_at,
     set_signal_position_quantity,
+    set_signal_reported_pnl,
     update_signal_status,
     update_signal_trade_values,
 )
@@ -85,6 +86,8 @@ def _trade_payload(signal_id: int):
         "initial_sl": float(signal.get("initial_stop_loss") or signal["stop_loss"]),
         "exit_price": float(signal["exit_price"]) if signal.get("exit_price") is not None else None,
         "pnl": float(signal["pnl"]) if signal.get("pnl") is not None else None,
+        "reported_pnl": float(signal["reported_pnl"]) if signal.get("reported_pnl") is not None else None,
+        "reported_pnl_currency": signal.get("reported_pnl_currency") or "USD",
         "entered": bool(signal.get("entered_at")),
         "entered_at": signal.get("entered_at"),
         "created_at": signal.get("created_at"),
@@ -108,6 +111,8 @@ def _signal_summary(signal):
         "reference_entry": signal.get("entry_price"),
         "tp": signal.get("take_profit"), "sl": signal.get("stop_loss"),
         "exit_price": signal.get("exit_price"), "pnl": signal.get("pnl"),
+        "reported_pnl": signal.get("reported_pnl"),
+        "reported_pnl_currency": signal.get("reported_pnl_currency") or "USD",
         "created_at": signal.get("created_at"), "entered_at": signal.get("entered_at"),
         "closed_at": signal.get("closed_at"),
         "entered": bool(signal.get("entered_at")), "quantity": signal.get("position_quantity"),
@@ -318,6 +323,22 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 if not math.isfinite(quantity) or quantity <= 0 or not set_signal_position_quantity(signal_id, quantity, source="telegram_mini_app"):
                     return self._send_json(400, {"error": "Введите положительный размер позиции"})
                 return self._send_json(200, {"trade": _trade_payload(signal_id), "message": "Размер позиции сохранён"})
+            if action == "actual_pnl":
+                if signal.get("status") not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
+                    return self._send_json(409, {"error": "Фактический результат можно записать после закрытия сделки"})
+                try:
+                    amount = _parse_user_number(payload.get("amount"))
+                except (TypeError, ValueError):
+                    return self._send_json(400, {"error": "Введите сумму со знаком, например 100 или -100"})
+                currency = str(payload.get("currency", "USD")).upper().strip()
+                if not math.isfinite(amount) or not re.fullmatch(r"[A-Z]{3}", currency):
+                    return self._send_json(400, {"error": "Проверьте сумму и трёхбуквенный код валюты"})
+                if not set_signal_reported_pnl(signal_id, amount, currency, source="telegram_mini_app"):
+                    return self._send_json(409, {"error": "Не удалось сохранить фактический P/L"})
+                return self._send_json(200, {
+                    "trade": _trade_payload(signal_id),
+                    "message": "Фактический P/L сохранён; изменение записано в журнал сделки",
+                })
             if action == "close":
                 if signal.get("status") != "OPEN":
                     return self._send_json(409, {"error": "Сделка уже закрыта"})

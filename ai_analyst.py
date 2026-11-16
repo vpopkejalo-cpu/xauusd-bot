@@ -45,6 +45,17 @@ def _build_rule_based_analysis(signals: List[Dict[str, Any]]) -> str:
     winrate = round((wins / finished * 100), 1) if finished > 0 else 0.0
     total_pnl = sum((s.get("pnl") or 0.0) for s in signals if s.get("status") in ("TP_HIT", "SL_HIT"))
     pnl_sign = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
+    reported = [s for s in signals if s.get("reported_pnl") is not None]
+    money_by_currency = {}
+    cash_wins = cash_losses = 0
+    for signal in reported:
+        amount = float(signal.get("reported_pnl") or 0.0)
+        currency = str(signal.get("reported_pnl_currency") or "USD").upper()
+        money_by_currency[currency] = money_by_currency.get(currency, 0.0) + amount
+        cash_wins += amount > 0
+        cash_losses += amount < 0
+    money_text = "; ".join(f"{currency} {amount:+.2f}" for currency, amount in sorted(money_by_currency.items())) or "не внесён"
+    cash_winrate = round(cash_wins / (cash_wins + cash_losses) * 100, 1) if cash_wins + cash_losses else None
 
     # Статистика по символам
     sym_stats: Dict[str, Dict[str, Any]] = {}
@@ -89,17 +100,19 @@ def _build_rule_based_analysis(signals: List[Dict[str, Any]]) -> str:
         "🤖 <b>AI-АНАЛИТИК: КОЛИЧЕСТВЕННЫЙ АУДИТ СЕССИИ</b>",
         "━━━━━━━━━━━━━━━━━━━",
         f"📊 Всего сигналов: <b>{total}</b> | Завершено: <b>{finished}</b>",
-        f"🎯 Винрейт сессии: <b>{winrate}%</b> (TP: {wins} / SL: {losses})",
-        f"💰 Итоговый PnL: <code>{pnl_sign} пунктов</code>\n",
+        f"🎯 Точность TP/SL: <b>{winrate}%</b> (TP: {wins} / SL: {losses})",
+        f"📏 Движение цены: <code>{pnl_sign} пунктов</code>",
+        f"💵 Фактический P/L: <code>{money_text}</code> ({len(reported)} сделок)",
+        f"📈 Прибыльность по фактическому P/L: <b>{cash_winrate}%</b>\n" if cash_winrate is not None else "📈 Прибыльность по фактическому P/L: пока нет данных\n",
         "🔍 <b>КЛЮЧЕВЫЕ ВЫВОДЫ АУДИТОРА:</b>"
     ]
 
     # Анализ худшего актива
     if worst_data.get("pnl", 0) < 0:
         lines.append(
-            f"1. <b>Критический отток капитала:</b> Основной убыток сосредоточен в <b>{worst_sym}</b> "
-            f"(PnL: <code>{worst_data['pnl']:.2f} п.</code>, Стопов: {worst_data['losses']}). "
-            "Рекомендуется проверить совпадение направления с дневным трендом."
+            f"1. <b>Отрицательное движение цены:</b> Наибольшее снижение было по <b>{worst_sym}</b> "
+            f"({worst_data['pnl']:.2f} п., стопов: {worst_data['losses']}). "
+            "Это движение цены, а не денежный убыток; для денежной оценки внеси P/L из брокера в карточки сделок."
         )
 
     # Анализ времени

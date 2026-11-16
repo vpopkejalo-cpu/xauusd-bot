@@ -76,19 +76,27 @@ def _utc_to_local_hhmm(utc_iso: str) -> str:
 
 
 def format_efficiency_rating(winrate: float, finished_count: int) -> str:
-    """Возвращает честный и профессиональный рейтинг эффективности торговли."""
+    """Rate TP/SL prediction accuracy; cash profitability is tracked separately."""
     if finished_count == 0:
         return "⚪ (Пока нет закрытых сделок)"
     if winrate >= 75:
-        return "⭐⭐⭐⭐⭐ (Отличный результат)"
+        return "⭐⭐⭐⭐⭐ (Высокая точность TP/SL)"
     elif winrate >= 60:
-        return "⭐⭐⭐⭐ (Хороший прибыльный результат)"
+        return "⭐⭐⭐⭐ (Хорошая точность TP/SL)"
     elif winrate >= 50:
-        return "⭐⭐⭐ (Средний / Около безубытка)"
+        return "⭐⭐⭐ (Средняя точность TP/SL)"
     elif winrate >= 40:
-        return "⭐⭐ (Низкий — требует оптимизации) ⚠️"
+        return "⭐⭐ (Низкая точность TP/SL) ⚠️"
     else:
-        return "⭐ (Критически низкий / Убыточный) 🛑"
+        return "⭐ (Критически низкая точность TP/SL) 🛑"
+
+
+def _format_actual_pnl_stats(stats: Dict[str, Any]) -> str:
+    """Format broker-reported money without ever summing different currencies."""
+    totals = stats.get("actual_pnl_by_currency") or {}
+    if not totals:
+        return "ещё не внесён в карточках сделок"
+    return "; ".join(f"{currency} {amount:+.2f}" for currency, amount in sorted(totals.items()))
 
 
 def get_main_keyboard(is_paused: bool = False) -> Dict:
@@ -921,22 +929,27 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
             pnl_val = stats["total_pnl"]
             pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
+            actual_pnl_text = _format_actual_pnl_stats(stats)
+            actual_winrate = stats.get("actual_winrate")
+            actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
 
             report = (
                 f"🏆 <b>СТАТИСТИКА ВИНРЕЙТА</b>\n"
                 f"Период: <b>{period_name}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Винрейт (Точность побед):</b> <b>{winrate}%</b>\n"
-                f"🏅 <b>Рейтинг эффективности:</b> {rating}\n\n"
+                f"🎯 <b>Точность TP/SL:</b> <b>{winrate}%</b>\n"
+                f"🏅 <b>Оценка точности:</b> {rating}\n\n"
                 f"📊 <b>Всего сигналов выдано:</b> {stats['total_signals']}\n"
                 f"✅ <b>Успешных (Take Profit):</b> {stats['wins']}\n"
                 f"🛑 <b>Убыточных (Stop Loss):</b> {stats['losses']}\n"
                 f"⌛ <b>Истекло по времени:</b> {stats['expired']}\n"
                 f"✖️ <b>Сброшено / Закрыто в 0:</b> {stats['manual']}\n"
                 f"⏳ <b>Сейчас в рынке (Open):</b> {stats['open_count']}\n\n"
-                f"💰 <b>Суммарный результат движения:</b> <code>{pnl_sign} пунктов</code>\n"
+                f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
+                f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
+                f"📈 <b>Прибыльность по фактическому P/L:</b> {actual_winrate_text}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Статистика строится строго по фактическим результатам ваших сделок.</i>"
+                f"<i>Точность TP/SL и денежный результат считаются отдельно.</i>"
             )
             open_sigs = get_open_signals()
             inline_rows = []
@@ -1274,17 +1287,22 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
                 pnl_val = stats["total_pnl"]
                 pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
+                actual_pnl_text = _format_actual_pnl_stats(stats)
+                actual_winrate = stats.get("actual_winrate")
+                actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
 
                 today_report = (
                     "📊 <b>ИТОГИ СЕГОДНЯШНЕГО ДНЯ:</b>\n"
                     "━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 <b>Винрейт за день:</b> <b>{winrate}%</b>\n"
+                    f"🎯 <b>Точность TP/SL за день:</b> <b>{winrate}%</b>\n"
                     f"🏅 <b>Оценка:</b> {rating}\n\n"
                     f"📊 <b>Сигналов выдано:</b> {stats['total_signals']}\n"
                     f"✅ <b>Take Profit:</b> {stats['wins']}\n"
                     f"🛑 <b>Stop Loss:</b> {stats['losses']}\n"
                     f"✖️ <b>Сброшено вручную:</b> {stats['manual']}\n\n"
-                    f"💰 <b>Суммарный результат:</b> <code>{pnl_sign} пунктов</code>\n"
+                    f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
+                    f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
+                    f"📈 <b>Прибыльность по фактическому P/L:</b> {actual_winrate_text}\n"
                     "━━━━━━━━━━━━━━━━━━━\n"
                     "<i>До встречи! 🌙</i>"
                 )

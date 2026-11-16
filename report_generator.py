@@ -69,6 +69,17 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     skipped_count = sum(1 for s in signals if s.get("status") == "SKIPPED")
     finished_count = wins + losses
     winrate = round((wins / finished_count * 100), 1) if finished_count > 0 else 0.0
+    actual_items = [s for s in signals if s.get("reported_pnl") is not None]
+    actual_by_currency = {}
+    actual_profit_count = actual_loss_count = 0
+    for item in actual_items:
+        amount = float(item.get("reported_pnl") or 0.0)
+        currency = str(item.get("reported_pnl_currency") or "USD").upper()
+        actual_by_currency[currency] = actual_by_currency.get(currency, 0.0) + amount
+        actual_profit_count += amount > 0
+        actual_loss_count += amount < 0
+    actual_winrate = round(actual_profit_count / (actual_profit_count + actual_loss_count) * 100, 1) if actual_profit_count + actual_loss_count else None
+    actual_pnl_text = "; ".join(f"{currency} {amount:+.2f}" for currency, amount in sorted(actual_by_currency.items())) or "нет внесённых значений"
     def price_moves_by_symbol(items):
         moves = {}
         for item in items:
@@ -132,8 +143,9 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append(f"• Активно в рынке (OPEN): {open_count}")
     lines.append(f"• Сброшено вручную:       {manual_count}")
     lines.append(f"• Пропущено (SKIP):       {skipped_count}")
-    lines.append(f"• Общий Винрейт:          {winrate}% (по {finished_count} завершенным сделкам)")
-    lines.append("• Денежный результат брокера: не передан")
+    lines.append(f"• Точность TP/SL:         {winrate}% (TP против SL, {finished_count} сделок)")
+    lines.append(f"• Фактический P/L:        {actual_pnl_text} ({len(actual_items)} записей)")
+    lines.append(f"• Прибыльность по P/L:    {actual_winrate}%" if actual_winrate is not None else "• Прибыльность по P/L:    пока недостаточно фактических записей")
     lines.append(f"• Изменение цены по инструментам: {format_price_moves(signals)}")
     lines.append("  Это оценка движения цены, не прибыль в валюте счёта.")
     lines.append("")
@@ -206,11 +218,11 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append("🚨 АНАЛИЗ ГИПОТЕЗЫ ВЛИЯНИЯ РЫНКА США (СРАВНЕНИЕ ДО И ПОСЛЕ 17:00 КИШИНЁВА):")
     lines.append("-" * 80)
     lines.append(f"☀️ ДНЕВНОЙ ПЕРИОД (до 17:00 Кишинёв — Лондонская сессия и утро):")
-    lines.append(f"   Сигналов: {day_total} | TP: {day_w} | SL: {day_l} | Винрейт: {day_wr}%")
+    lines.append(f"   Сигналов: {day_total} | TP: {day_w} | SL: {day_l} | Точность TP/SL: {day_wr}%")
     lines.append(f"   Изменение цены по инструментам: {format_price_moves(day_sigs)}")
     lines.append("")
     lines.append(f"🌙 ВЕЧЕРНИЙ ПЕРИОД (после 17:00 Кишинёв — Сессия США & Уолл-стрит):")
-    lines.append(f"   Сигналов: {eve_total} | TP: {eve_w} | SL: {eve_l} | Винрейт: {eve_wr}%")
+    lines.append(f"   Сигналов: {eve_total} | TP: {eve_w} | SL: {eve_l} | Точность TP/SL: {eve_wr}%")
     lines.append(f"   Изменение цены по инструментам: {format_price_moves(evening_sigs)}")
     lines.append("")
 
@@ -496,7 +508,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
         "analysis_csv_filename": f"analysis_data_{date_str}.csv",
         "signals_count": total_count,
         "winrate": winrate,
-        "pnl_str": "ценовые изменения — в CSV по инструментам; денежный PnL не передан",
+        "pnl_str": actual_pnl_text,
         "day_signals": day_total,
         "evening_signals": eve_total,
         "day_winrate": day_wr,
