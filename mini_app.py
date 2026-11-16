@@ -8,7 +8,8 @@ import logging
 import math
 import re
 import time
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
@@ -174,17 +175,31 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 status = payload.get("status")
                 if status not in (None, "OPEN", "TP_HIT", "SL_HIT", "MANUAL_CLOSE", "SKIPPED", "EXPIRED", "MANUAL_RESET"):
                     return self._send_json(400, {"error": "Неизвестный фильтр сделок"})
-                try:
-                    date_from = date.fromisoformat(payload["date_from"]) if payload.get("date_from") else None
-                    date_to = date.fromisoformat(payload["date_to"]) if payload.get("date_to") else None
-                except (TypeError, ValueError):
-                    return self._send_json(400, {"error": "Введите корректный диапазон дат"})
-                if date_from and date_to and date_from > date_to:
-                    return self._send_json(400, {"error": "Начальная дата позже конечной"})
+                period = payload.get("period", "all")
+                if period not in ("today", "week", "month", "all"):
+                    return self._send_json(400, {"error": "Неизвестный период истории"})
+                date_from = date_to_exclusive = None
+                if period != "all":
+                    local_today = datetime.now(ZoneInfo("Europe/Chisinau")).date()
+                    if period == "today":
+                        start_day = local_today
+                        end_day = start_day + timedelta(days=1)
+                    elif period == "week":
+                        start_day = local_today - timedelta(days=local_today.weekday())
+                        end_day = start_day + timedelta(days=7)
+                    else:
+                        start_day = local_today.replace(day=1)
+                        end_day = start_day.replace(year=start_day.year + (start_day.month == 12),
+                                                    month=1 if start_day.month == 12 else start_day.month + 1)
+                    utc = timezone.utc
+                    date_from = datetime.combine(start_day, datetime.min.time(), ZoneInfo("Europe/Chisinau"))
+                    date_to_exclusive = datetime.combine(end_day, datetime.min.time(), ZoneInfo("Europe/Chisinau"))
+                    date_from = date_from.astimezone(utc).replace(tzinfo=None).isoformat(timespec="seconds")
+                    date_to_exclusive = date_to_exclusive.astimezone(utc).replace(tzinfo=None).isoformat(timespec="seconds")
                 rows = get_recent_signals(
                     limit=1000, status=status,
-                    date_from=f"{date_from.isoformat()}T00:00:00" if date_from else None,
-                    date_to_exclusive=f"{(date_to + timedelta(days=1)).isoformat()}T00:00:00" if date_to else None,
+                    date_from=date_from,
+                    date_to_exclusive=date_to_exclusive,
                 )
                 return self._send_json(200, {"trades": [_signal_summary(row) for row in rows]})
 
