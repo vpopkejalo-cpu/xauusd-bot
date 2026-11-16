@@ -107,7 +107,8 @@ def _signal_summary(signal):
         "reference_entry": signal.get("entry_price"),
         "tp": signal.get("take_profit"), "sl": signal.get("stop_loss"),
         "exit_price": signal.get("exit_price"), "pnl": signal.get("pnl"),
-        "created_at": signal.get("created_at"), "closed_at": signal.get("closed_at"),
+        "created_at": signal.get("created_at"), "entered_at": signal.get("entered_at"),
+        "closed_at": signal.get("closed_at"),
         "entered": bool(signal.get("entered_at")), "quantity": signal.get("position_quantity"),
         "probability": signal.get("probability"),
     }
@@ -142,6 +143,7 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if urlparse(self.path).path not in ("/api/miniapp", "/api/miniapp/trade"):
             return self._send_json(404, {"error": "Маршрут не найден"})
+        payload = {}
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length <= 0 or content_length > _MAX_BODY_BYTES:
@@ -284,8 +286,14 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 intent = payload.get("status")
                 if intent not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
                     return self._send_json(400, {"error": "Выберите результат закрытия"})
-                exit_price = float(payload["exit_price"])
-                entry = float(signal.get("actual_entry_price") or signal.get("entry_price") or 0)
+                raw_exit = payload.get("exit_price")
+                if isinstance(raw_exit, str):
+                    raw_exit = raw_exit.replace("\u00a0", "").replace(" ", "").replace(",", ".")
+                try:
+                    exit_price = float(raw_exit)
+                    entry = float(signal.get("actual_entry_price") or signal.get("entry_price") or 0)
+                except (TypeError, ValueError):
+                    return self._send_json(400, {"error": "Укажите фактическую цену выхода числом, например 94.66"})
                 if not math.isfinite(exit_price) or exit_price <= 0 or entry <= 0:
                     return self._send_json(400, {"error": "Введите положительную цену выхода"})
                 move = exit_price - entry
@@ -323,7 +331,11 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
             if not update_signal_trade_values(signal_id, entry, take_profit, stop_loss, source="telegram_mini_app"):
                 return self._send_json(409, {"error": "Сделка уже закрыта; изменения не сохранены"})
             return self._send_json(200, {"message": "Уровни сохранены в истории сделки", "trade": _trade_payload(signal_id)})
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Mini App request validation failed: action=%s error_type=%s",
+                payload.get("action", "unknown"), type(exc).__name__,
+            )
             return self._send_json(400, {"error": "Проверьте введённые значения"})
         except Exception:
             logger.exception("Mini App trade request failed")
