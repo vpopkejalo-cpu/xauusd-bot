@@ -19,6 +19,7 @@ from database import (
     close_all_open_signals,
     get_analysis_logs,
     get_model_snapshots_history,
+    log_operational_event,
     get_open_signals,
     get_recent_analyses,
     get_recent_signals,
@@ -183,6 +184,10 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(401, {"error": "Не удалось подтвердить Telegram аккаунт"})
             action = str(payload.get("action", ""))
             signal_id = int(payload.get("trade_id", 0) or 0)
+            log_operational_event("mini_app_action", "telegram_mini_app", {
+                "action": action[:80], "trade_id": signal_id or None,
+                "user_id": int(user.get("id", 0)),
+            })
 
             if action == "overview":
                 open_signals = get_open_signals()

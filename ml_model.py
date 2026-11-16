@@ -30,7 +30,7 @@ from sklearn.metrics import accuracy_score
 
 from config import MODEL_PATH, MODELS_DIR, MIN_PROBABILITY
 from risk_manager import get_asset_profile
-from database import log_training_run, save_model_snapshot, get_latest_model_snapshots
+from database import log_training_run, save_model_snapshot, get_latest_model_snapshots, log_operational_event
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,7 @@ class TradingMLModel:
 
         # Render's local filesystem can be ephemeral; the newest DB artifact is authoritative.
         try:
+            restored_from_db = []
             for snapshot in get_latest_model_snapshots(include_artifact=True):
                 artifact = snapshot.get("artifact")
                 if not artifact:
@@ -141,9 +142,17 @@ class TradingMLModel:
                 self.model_snapshot_ids[symbol] = int(snapshot["id"])
                 self.model_snapshot_hashes[symbol] = expected
                 self.model_trained_at[symbol] = snapshot.get("trained_at")
+                restored_from_db.append({"symbol": symbol, "snapshot_id": int(snapshot["id"]),
+                                         "sha256": expected, "samples": self.samples_counts[symbol],
+                                         "cv_accuracy": self.accuracies[symbol]})
                 logger.info("Восстановлена модель %s из БД: snapshot=%s, CV=%.1f%%, samples=%s",
                             symbol, snapshot["id"], self.accuracies[symbol] * 100, self.samples_counts[symbol])
+            log_operational_event("models_restored_from_database", "ml_model", {"models": restored_from_db})
         except Exception as exc:
+            try:
+                log_operational_event("model_restore_failed", "ml_model", {"error_type": type(exc).__name__, "error": str(exc)[:4000]})
+            except Exception:
+                pass
             logger.warning("Не удалось восстановить снимки ML из БД: %s", exc)
 
         # One-time import of old local models that predate database snapshots.
@@ -354,15 +363,21 @@ class TradingMLModel:
         """
         Обучает модель для конкретного актива с использованием временной кросс-валидации.
         """
+        training_started_at = datetime.now(timezone.utc).isoformat()
         try:
+            log_operational_event("training_started", "ml_model", {"symbol": symbol, "input_rows": int(len(df)) if df is not None else 0,
+                                                                      "started_at": training_started_at})
             X, y = self.prepare_dataset(df, symbol=symbol)
             if len(X) < 35:
                 logger.warning(f"[{symbol}] Недостаточно размеченных сделок ({len(X)} образцов). Требуется минимум 35.")
+                log_operational_event("training_skipped", "ml_model", {"symbol": symbol, "reason": "insufficient_samples", "samples": int(len(X))})
                 return False
 
             unique_classes = np.unique(y)
             if len(unique_classes) < 2:
                 logger.warning(f"[{symbol}] В выборке представлен только один класс ({unique_classes}). Обучение отложено.")
+                log_operational_event("training_skipped", "ml_model", {"symbol": symbol, "reason": "single_class", "samples": int(len(X)),
+                                                                          "classes": [str(item) for item in unique_classes]})
                 return False
 
             # Создаем Pipeline со стандартизацией и регуляризованной логистической регрессией
@@ -420,15 +435,33 @@ class TradingMLModel:
                 symbol, pipeline, mean_acc, len(X), training_metadata=training_metadata,
                 trained_at=trained_at,
             )
-            log_training_run(
-                samples_count=len(X), accuracy=mean_acc,
-                notes=f"Индивидуальная модель {symbol}; snapshot_id={snapshot_id}; CV folds={n_splits}",
-            )
+            try:
+                log_training_run(
+                    samples_count=len(X), accuracy=mean_acc,
+                    notes=f"Индивидуальная модель {symbol}; snapshot_id={snapshot_id}; CV folds={n_splits}",
+                )
+            except Exception as log_error:
+                # The exact model artifact was already committed; a secondary summary row
+                # must not turn a successful, durable training run into a reported failure.
+                logger.exception("Снимок модели %s сохранён (#%s), но сводная строка обучения не записана: %s",
+                                 symbol, snapshot_id, log_error)
+            log_operational_event("training_succeeded", "ml_model", {
+                "symbol": symbol, "snapshot_id": snapshot_id, "samples": int(len(X)),
+                "cv_accuracy": mean_acc, "fold_accuracies": [float(value) for value in accuracies],
+                "started_at": training_started_at, "finished_at": trained_at,
+            })
 
             logger.info(f"[{symbol}] Обучение успешно завершено. Образцов: {len(X)}, Точность CV: {mean_acc:.1%}")
             return True
 
         except Exception as e:
+            try:
+                log_operational_event("training_failed", "ml_model", {
+                    "symbol": symbol, "started_at": training_started_at,
+                    "error_type": type(e).__name__, "error": str(e)[:4000],
+                })
+            except Exception:
+                pass
             logger.error(f"[{symbol}] Ошибка при обучении ML модели: {e}", exc_info=True)
             return False
 

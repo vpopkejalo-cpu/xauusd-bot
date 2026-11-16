@@ -37,7 +37,7 @@ def test_system():
     # Генерация синтетических свечей XAU/USD
     now = datetime.now(timezone.utc)
     timestamps = [now - timedelta(minutes=5 * (120 - i)) for i in range(120)]
-    
+
     # Симуляция реалистичного случайного блуждания золота вокруг $2700
     np.random.seed(42)
     prices = [2700.0]
@@ -125,14 +125,14 @@ def test_system():
 
     # Симулируем 3 стоп-лосса подряд
     sim_stats = {"consecutive_losses": 3, "total_signals": 6, "net_pnl": -18.5}
-    
+
     # В ДЕМО-режиме Kill Switch не должен блокировать непрерывную торговлю
     from config import DEMO_MODE, KILL_SWITCH_ENABLED
     if DEMO_MODE or not KILL_SWITCH_ENABLED:
         ks_triggered, _ = evaluate_kill_switch(sim_stats)
         assert not ks_triggered, "На демо-счете Kill Switch не должен блокировать сделки"
         print("Демо-режим: Kill Switch пассивен, бот не блокирует сбор опыта.")
-    
+
     # Прямая проверка триггера и сброса
     trigger_kill_switch("Тестовая авария", force=True)
     active, current_reason = is_kill_switch_active()
@@ -157,7 +157,7 @@ def test_system():
     update_signal_status(sig_id, "TP_HIT", risk_gold["take_profit"], risk_gold["take_profit"] - entry_price)
     open_sigs_after = get_open_signals()
     assert not any(s["id"] == sig_id for s in open_sigs_after), "Сигнал должен быть закрыт"
-    
+
     # Проверка винрейта строго за СЕГОДНЯ
     from database import get_winrate_stats
     today_stats = get_winrate_stats(1)

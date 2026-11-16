@@ -29,7 +29,7 @@ from config import (
     DEMO_MODE,
     KILL_SWITCH_ENABLED
 )
-from database import get_db, IS_POSTGRES, is_bot_paused, is_kill_switch_active, get_today_signal_stats
+from database import get_db, IS_POSTGRES, is_bot_paused, is_kill_switch_active, get_today_signal_stats, log_operational_event
 from ml_model import TradingMLModel, FEATURE_COLUMNS
 from risk_manager import get_asset_profile, is_market_open
 
@@ -371,12 +371,20 @@ def _check_database() -> Dict[str, Any]:
             open_cnt = cur.fetchone()["cnt"]
             cur.execute("SELECT COUNT(*) as cnt FROM model_snapshots")
             model_snapshots_cnt = cur.fetchone()["cnt"]
+            cur.execute("SELECT COUNT(*) as cnt FROM analysis_logs")
+            analysis_cnt = cur.fetchone()["cnt"]
+            cur.execute("SELECT COUNT(*) as cnt FROM operational_events")
+            operational_events_cnt = cur.fetchone()["cnt"]
+            cur.execute("SELECT COUNT(*) as cnt FROM runtime_logs")
+            runtime_logs_cnt = cur.fetchone()["cnt"]
         latency = int((time.time() - t0) * 1000)
         db_name = "PostgreSQL (Cloud)" if IS_POSTGRES else "SQLite (Local)"
         return {
             "status": "OK",
             "title": "База данных",
-            "message": f"{db_name} ({latency} мс) | Свечей: {candles_cnt} | Сделок: {signals_cnt} (в рынке: {open_cnt}) | Снимков ML-весов: {model_snapshots_cnt}",
+            "message": (f"{db_name} ({latency} мс) | Свечей: {candles_cnt} | Сделок: {signals_cnt} (в рынке: {open_cnt}) "
+                        f"| Анализов: {analysis_cnt} | Событий: {operational_events_cnt} "
+                        f"| Ошибок/предупреждений: {runtime_logs_cnt} | Снимков ML-весов: {model_snapshots_cnt}"),
             "icon": "🟢"
         }
     except Exception as e:
@@ -538,6 +546,14 @@ def run_full_system_check() -> Dict[str, Any]:
     lines.append(f"• <b>Рыночная сессия:</b> {'🟢 Торги открыты' if market_open else f'🟡 Рынок закрыт ({market_reason})'}")
     
     report_text = "\n".join(lines)
+    try:
+        log_operational_event("system_check_completed", "system_checker", {
+            "elapsed_seconds": elapsed, "api_errors": errors,
+            "api_statuses": {name: result.get("status") for name, result in api_results.items()},
+            "model_statuses": {item.get("symbol"): item.get("status") for item in ml_results},
+        })
+    except Exception as exc:
+        logger.warning("Не удалось сохранить итог проверки систем в БД: %s", exc)
     return {
         "report_text": report_text,
         "errors_count": errors,

@@ -20,6 +20,8 @@ from database import (
     get_latest_model_snapshots,
     get_runtime_logs,
     get_analysis_logs,
+    get_operational_events,
+    log_operational_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     signals = get_signals_for_report(days=days, limit=limit)
     runtime_logs = get_runtime_logs(days=days, limit=250)
     analysis_rows = get_analysis_logs(days=days, limit=10000)
+    operational_events = get_operational_events(days=days, limit=10000)
 
     # Статистика сессии
     total_count = len(signals)
@@ -137,6 +140,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     lines.append("-" * 80)
     lines.append(f"• Всего сигналов:        {total_count}")
     lines.append(f"• Записей свечного анализа с признаками и версией модели: {len(analysis_rows)}")
+    lines.append(f"• Операционных событий (управление/обучение/ошибки циклов): {len(operational_events)}")
     lines.append(f"• Предупреждений / ошибок процесса: {sum(1 for item in runtime_logs if item.get('level') == 'WARNING')} / {sum(1 for item in runtime_logs if item.get('level') in ('ERROR', 'CRITICAL'))}")
     lines.append(f"• Закрыто по Take Profit: {wins} (TP)")
     lines.append(f"• Закрыто по Stop Loss:   {losses} (SL)")
@@ -213,6 +217,15 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
             lines.append(str(item["exception_text"])[:3000])
     lines.append("")
 
+    lines.append("4. ЖУРНАЛ ОПЕРАЦИОННЫХ СОБЫТИЙ:")
+    lines.append("-" * 80)
+    if not operational_events:
+        lines.append("За выбранный период операционных событий не записано.")
+    for item in operational_events:
+        details = json.dumps(item.get("details", {}), ensure_ascii=False, default=str, sort_keys=True)
+        lines.append(f"[{item.get('created_at', '')} UTC] {item.get('event_type')} · {item.get('source')} · {details[:2000]}")
+    lines.append("")
+
     # Раздел 2: Анализ гипотезы рынка США после 17:00
     lines.append("-" * 80)
     lines.append("🚨 АНАЛИЗ ГИПОТЕЗЫ ВЛИЯНИЯ РЫНКА США (СРАВНЕНИЕ ДО И ПОСЛЕ 17:00 КИШИНЁВА):")
@@ -241,7 +254,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
 
     # Раздел 3: Детальный разбор каждой сделки
     lines.append("=" * 80)
-    lines.append("4. ДЕТАЛЬНЫЙ РАЗБОР КАЖДОЙ СДЕЛКИ (DEEP-DIVE):")
+    lines.append("5. ДЕТАЛЬНЫЙ РАЗБОР КАЖДОЙ СДЕЛКИ (DEEP-DIVE):")
     lines.append("=" * 80)
 
     if not signals:
@@ -390,7 +403,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     # Раздел 4: Рекомендации
     lines.append("")
     lines.append("=" * 80)
-    lines.append("5. РЕКОМЕНДАЦИИ И НАБЛЮДЕНИЯ ПО РЕЗУЛЬТАТАМ ДИАГНОСТИКИ:")
+    lines.append("6. РЕКОМЕНДАЦИИ И НАБЛЮДЕНИЯ ПО РЕЗУЛЬТАТАМ ДИАГНОСТИКИ:")
     lines.append("=" * 80)
     lines.append("1. Сравнивайте результаты по инструменту, направлению, времени и фактическим ценам входа/выхода.")
     lines.append("2. Не трактуйте сумму ценовых изменений по разным инструментам как прибыль в валюте счёта.")
@@ -499,6 +512,10 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
         ])
     analysis_csv_content = analysis_buffer.getvalue()
 
+    log_operational_event("diagnostics_report_generated", "report_generator", {
+        "days": int(days), "signals": total_count, "candle_analyses": len(analysis_rows),
+        "operational_events_included": len(operational_events), "runtime_logs_included": len(runtime_logs),
+    })
     return {
         "txt_content": txt_content,
         "csv_content": csv_content,

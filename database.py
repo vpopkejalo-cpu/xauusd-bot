@@ -129,22 +129,19 @@ def init_db():
                     model_snapshot_id INTEGER
                 )
             """)
-            try:
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_price REAL")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_source TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS position_quantity REAL")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pnl_basis TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_source TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl REAL")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl_currency TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_stop_loss REAL")
-                cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS model_snapshot_id INTEGER")
-            except Exception:
-                pass
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_price REAL")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_source TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS position_quantity REAL")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS pnl_basis TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_source TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl REAL")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reported_pnl_currency TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entered_at TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS diagnostic_data TEXT")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_take_profit REAL")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_stop_loss REAL")
+            cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS model_snapshot_id INTEGER")
 
             cursor.execute("UPDATE signals SET initial_take_profit = take_profit WHERE initial_take_profit IS NULL")
             cursor.execute("UPDATE signals SET initial_stop_loss = stop_loss WHERE initial_stop_loss IS NULL")
@@ -257,37 +254,34 @@ def init_db():
                     model_snapshot_id INTEGER
                 )
             """)
-            try:
-                cursor.execute("PRAGMA table_info(signals)")
-                cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
-                if "message_id" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
-                if "actual_entry_price" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_price REAL")
-                if "actual_entry_source" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_source TEXT")
-                if "position_quantity" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN position_quantity REAL")
-                if "pnl_basis" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN pnl_basis TEXT")
-                if "exit_source" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN exit_source TEXT")
-                if "reported_pnl" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl REAL")
-                if "reported_pnl_currency" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl_currency TEXT")
-                if "entered_at" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
-                if "diagnostic_data" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN diagnostic_data TEXT")
-                if "initial_take_profit" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN initial_take_profit REAL")
-                if "initial_stop_loss" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN initial_stop_loss REAL")
-                if "model_snapshot_id" not in cols:
-                    cursor.execute("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
-            except Exception:
-                pass
+            cursor.execute("PRAGMA table_info(signals)")
+            cols = [row[1] if isinstance(row, (tuple, list)) else row["name"] for row in cursor.fetchall()]
+            if "message_id" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN message_id INTEGER")
+            if "actual_entry_price" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_price REAL")
+            if "actual_entry_source" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN actual_entry_source TEXT")
+            if "position_quantity" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN position_quantity REAL")
+            if "pnl_basis" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN pnl_basis TEXT")
+            if "exit_source" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN exit_source TEXT")
+            if "reported_pnl" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl REAL")
+            if "reported_pnl_currency" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN reported_pnl_currency TEXT")
+            if "entered_at" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN entered_at TEXT")
+            if "diagnostic_data" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN diagnostic_data TEXT")
+            if "initial_take_profit" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN initial_take_profit REAL")
+            if "initial_stop_loss" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN initial_stop_loss REAL")
+            if "model_snapshot_id" not in cols:
+                cursor.execute("ALTER TABLE signals ADD COLUMN model_snapshot_id INTEGER")
 
             cursor.execute("UPDATE signals SET initial_take_profit = take_profit WHERE initial_take_profit IS NULL")
             cursor.execute("UPDATE signals SET initial_stop_loss = stop_loss WHERE initial_stop_loss IS NULL")
@@ -384,6 +378,16 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_runtime_logs_time ON runtime_logs (created_at, level)")
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS operational_events (
+                id {"BIGSERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"},
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                details_json TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_operational_events_time ON operational_events (created_at, event_type)")
         if not IS_POSTGRES:
             cursor.execute("PRAGMA table_info(analysis_logs)")
             analysis_cols = [row[1] for row in cursor.fetchall()]
@@ -424,8 +428,64 @@ def log_candle_analysis(
             str(outcome),
             str(details),
             int(model_snapshot_id) if model_snapshot_id is not None else None,
-            json.dumps(diagnostics or {}, ensure_ascii=False, default=str),
+            _json_dumps_safe(diagnostics or {}),
         ))
+
+
+def _json_dumps_safe(value: Any) -> str:
+    """Serialize diagnostics losslessly where possible, replacing NaN/Inf with null."""
+    import math
+    from datetime import date
+
+    def clean(item):
+        if isinstance(item, dict):
+            return {str(key): clean(val) for key, val in item.items()}
+        if isinstance(item, (list, tuple, set)):
+            return [clean(val) for val in item]
+        if isinstance(item, (datetime, date)):
+            return item.isoformat()
+        if hasattr(item, "item"):
+            try:
+                item = item.item()
+            except Exception:
+                return str(item)
+        if isinstance(item, float) and not math.isfinite(item):
+            return None
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return item
+        return str(item)
+
+    return json.dumps(clean(value), ensure_ascii=False, allow_nan=False)
+
+
+def _record_operational_event(cursor, event_type: str, source: str, details: Dict[str, Any]):
+    sql = _adapt_sql("""INSERT INTO operational_events (created_at, event_type, source, details_json)
+        VALUES (?, ?, ?, ?)""")
+    cursor.execute(sql, (datetime.utcnow().isoformat(), str(event_type)[:100],
+                         str(source)[:100], _json_dumps_safe(details or {})))
+
+
+def log_operational_event(event_type: str, source: str = "bot", details: Optional[Dict[str, Any]] = None):
+    """Persist a timestamped lifecycle/action event for audit and later analysis."""
+    with get_db() as cursor:
+        _record_operational_event(cursor, event_type, source, details or {})
+
+
+def get_operational_events(days: int = 1, limit: int = 1000) -> List[Dict[str, Any]]:
+    from datetime import timedelta
+    since = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00" if days == 1 else (
+        datetime.utcnow() - timedelta(days=max(1, int(days)))
+    ).isoformat()
+    sql = _adapt_sql("SELECT * FROM operational_events WHERE created_at >= ? ORDER BY id DESC LIMIT ?")
+    with get_db() as cursor:
+        cursor.execute(sql, (since, max(1, int(limit))))
+        rows = [dict(row) for row in cursor.fetchall()]
+    for row in rows:
+        try:
+            row["details"] = json.loads(row.pop("details_json", "{}") or "{}")
+        except (TypeError, ValueError):
+            row["details"] = {}
+    return list(reversed(rows))
 
 
 def get_recent_analyses(limit: int = 6) -> List[Dict[str, Any]]:
@@ -468,6 +528,7 @@ def set_bot_paused(is_paused: bool):
     """)
     with get_db() as cursor:
         cursor.execute(sql, ("is_paused", val))
+        _record_operational_event(cursor, "bot_paused" if is_paused else "bot_resumed", "user", {})
 
 
 def is_bot_paused() -> bool:
@@ -488,6 +549,7 @@ def request_retrain():
     """)
     with get_db() as cursor:
         cursor.execute(sql)
+        _record_operational_event(cursor, "retrain_requested", "user", {})
 
 
 def consume_retrain_request() -> bool:
@@ -497,6 +559,7 @@ def consume_retrain_request() -> bool:
         row = cursor.fetchone()
         if row and row["value"].lower() == "true":
             cursor.execute("UPDATE bot_settings SET value = 'false' WHERE key = 'request_retrain'")
+            _record_operational_event(cursor, "retrain_request_consumed", "bot", {})
             return True
         return False
 
@@ -664,7 +727,7 @@ def save_signal(
     model_snapshot_id: Optional[int] = None
 ) -> int:
     """Сохраняет сигнал в базу данных (включая глубокие диагностические данные весов и контекста) и возвращает его ID."""
-    diag_json = json.dumps(diagnostic_data, ensure_ascii=False) if diagnostic_data else None
+    diag_json = _json_dumps_safe(diagnostic_data) if diagnostic_data else None
 
     with get_db() as cursor:
         if IS_POSTGRES:
@@ -730,7 +793,7 @@ def _record_signal_event(cursor, signal_id: int, event_type: str, source: str, e
     sql = _adapt_sql("""INSERT INTO signal_events
         (signal_id, event_type, source, event_data, created_at) VALUES (?, ?, ?, ?, ?)""")
     cursor.execute(sql, (int(signal_id), str(event_type), str(source),
-                         json.dumps(event_data, ensure_ascii=False, default=str), datetime.utcnow().isoformat()))
+                         _json_dumps_safe(event_data), datetime.utcnow().isoformat()))
 
 
 def set_signal_message_id(signal_id: int, message_id: int):
@@ -738,6 +801,8 @@ def set_signal_message_id(signal_id: int, message_id: int):
     sql = _adapt_sql("UPDATE signals SET message_id = ? WHERE id = ?")
     with get_db() as cursor:
         cursor.execute(sql, (int(message_id), int(signal_id)))
+        if cursor.rowcount:
+            _record_signal_event(cursor, signal_id, "telegram_message_linked", "telegram", {"message_id": int(message_id)})
 
 
 def set_signal_entered_at(signal_id: int, source: str = "widget"):
@@ -1254,7 +1319,7 @@ def is_kill_switch_active() -> Tuple[bool, str]:
                 return True, reason
             else:
                 # Новые сутки — автоматический сброс
-                reset_kill_switch()
+                reset_kill_switch(source="bot_daily_rollover")
                 return False, ""
     return False, ""
 
@@ -1277,6 +1342,7 @@ def trigger_kill_switch(reason: str, force: bool = False):
     """Активирует аварийный Kill Switch на текущие сутки UTC (если не было ручного снятия)."""
     if not force and is_kill_switch_manually_overridden():
         logger.info(f"Kill Switch пропущен: пользователь вручную разрешил торговлю на сегодня ({reason})")
+        log_operational_event("kill_switch_activation_suppressed", "bot", {"reason": str(reason), "forced": False})
         return
 
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
@@ -1292,10 +1358,11 @@ def trigger_kill_switch(reason: str, force: bool = False):
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
             """)
             cursor.execute(sql, (k, v))
+        _record_operational_event(cursor, "kill_switch_activated", "bot", {"reason": str(reason), "forced": bool(force)})
     logger.warning(f"🛑 KILL SWITCH АКТИВИРОВАН: {reason}")
 
 
-def reset_kill_switch():
+def reset_kill_switch(source: str = "user"):
     """Сбрасывает флаг аварийного Kill Switch и запоминает ручную разблокировку на текущий день."""
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     with get_db() as cursor:
@@ -1309,5 +1376,5 @@ def reset_kill_switch():
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
             """)
             cursor.execute(sql, (k, v))
+        _record_operational_event(cursor, "kill_switch_reset", source, {})
     logger.info("🔓 Kill Switch сброшен. Ручная разблокировка зафиксирована на сегодня.")
-

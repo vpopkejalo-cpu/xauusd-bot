@@ -69,6 +69,7 @@ from database import (
     trigger_kill_switch,
     reset_kill_switch,
     save_runtime_log,
+    log_operational_event,
 )
 from data_fetcher import DataFetcher, RateLimitError
 from indicators import calculate_indicators
@@ -121,7 +122,7 @@ class DatabaseRuntimeLogHandler(logging.Handler):
     def emit(self, record):
         try:
             message = record.getMessage()
-            exception_text = self.formatter.formatException(record.exc_info) if record.exc_info else ""
+            exception_text = logging.Formatter().formatException(record.exc_info) if record.exc_info else ""
             for secret in self.secrets:
                 message = message.replace(secret, "[REDACTED]")
                 exception_text = exception_text.replace(secret, "[REDACTED]")
@@ -175,6 +176,8 @@ def main():
     # 2. Инициализация базы данных SQLite
     init_db()
     logging.getLogger().addHandler(DatabaseRuntimeLogHandler())
+    log_operational_event("process_started", "main", {"symbols": list(SYMBOLS), "timeframe": TIMEFRAME,
+                                                        "demo_mode": DEMO_MODE, "kill_switch_enabled": KILL_SWITCH_ENABLED})
 
     # 3. Запуск веб-сервера для удержания облака
     start_health_server()
@@ -220,6 +223,8 @@ def main():
 
     last_retrain_time = time.time()
     last_processed_timestamps = {s: None for s in SYMBOLS}
+    last_market_state = None
+    symbols_without_fresh_data = set()
     last_kill_switch_alert_sent = False
 
     logger.info(f"Основной цикл запущен. Мониторинг каждые {POLL_INTERVAL_SECONDS} сек. 24/7.")
@@ -263,6 +268,13 @@ def main():
 
             # Проверка открытия мирового рынка (выходные)
             market_open, market_reason = is_market_open(now_utc)
+            market_state = (bool(market_open), str(market_reason))
+            if market_state != last_market_state:
+                log_operational_event("market_state_changed", "main", {
+                    "market_open": bool(market_open), "reason": str(market_reason),
+                    "observed_at_utc": now_utc.isoformat(),
+                })
+                last_market_state = market_state
 
             # 2. ПОСЛЕДОВАТЕЛЬНЫЙ АНАЛИЗ ВСЕХ АКТИВОВ
             for sym in SYMBOLS:
@@ -279,7 +291,11 @@ def main():
                     # 1. Получаем свежие свечи с защитой от rate limits
                     df = fetcher.fetch_time_series(symbol=sym, outputsize=70)
                     if df.empty:
+                        if sym not in symbols_without_fresh_data:
+                            log_operational_event("market_data_empty", "main", {"symbol": sym})
+                            symbols_without_fresh_data.add(sym)
                         continue
+                    symbols_without_fresh_data.discard(sym)
 
                     save_candles(df, symbol=sym)
                     df_with_ind = calculate_indicators(df, atr_period=ATR_PERIOD)
@@ -624,9 +640,14 @@ def main():
 
                 except RateLimitError as e:
                     logger.warning(f"[{sym}] Rate limit Twelve Data: {e}. Пауза 10 сек...")
+                    log_operational_event("market_data_rate_limited", "main", {"symbol": sym, "error": str(e)[:2000]})
                     time.sleep(10)
                 except Exception as e:
                     logger.error(f"Ошибка при обработке {sym}: {e}", exc_info=False)
+                    log_operational_event("symbol_cycle_failed", "main", {
+                        "symbol": sym, "candle_timestamp": str(locals().get("latest_timestamp", "")),
+                        "error_type": type(e).__name__, "error": str(e)[:4000],
+                    })
 
             # 3. ПЕРИОДИЧЕСКОЕ САМООБУЧЕНИЕ МОДЕЛЕЙ (Каждые 4 часа или по запросу пользователя)
             elapsed_hours = (time.time() - last_retrain_time) / 3600.0
@@ -654,9 +675,14 @@ def main():
                     except Exception:
                         pass
                     last_retrain_time = time.time()
+                log_operational_event("retraining_batch_finished", "main", {
+                    "trigger": trigger_reason, "requested_symbols": list(SYMBOLS),
+                    "successful_symbols": int(retrained_count),
+                })
 
         except Exception as e:
             logger.error(f"Непредвиденная ошибка в основном цикле: {e}", exc_info=True)
+            log_operational_event("main_loop_failed", "main", {"error_type": type(e).__name__, "error": str(e)[:4000]})
 
         # Пауза перед следующим циклом опроса
         for _ in range(POLL_INTERVAL_SECONDS):
@@ -665,6 +691,7 @@ def main():
             time.sleep(1)
 
     logger.info("Бот завершил работу.")
+    log_operational_event("process_stopped", "main", {})
 
 
 if __name__ == "__main__":
