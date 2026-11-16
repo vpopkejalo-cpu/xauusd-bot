@@ -123,7 +123,8 @@ def _parse_user_number(value) -> float:
     """Accept decimal comma/dot and common thousands separators from user input."""
     if value is None or isinstance(value, bool):
         raise ValueError("Число не задано")
-    text = re.sub(r"[\s\u00a0\u202f_'’]", "", str(value).strip())
+    # Strip spaces, grouping marks and invisible characters copied by Telegram/markets.
+    text = re.sub(r"[\s\u00a0\u202f\u200b\u200c\u200d\u2060\ufeff_'’]", "", str(value).strip())
     if not text:
         raise ValueError("Число не задано")
     if "," in text and "." in text:
