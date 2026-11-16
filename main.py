@@ -24,7 +24,7 @@ import signal
 import logging
 import threading
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -76,6 +76,7 @@ from risk_manager import (
     check_symbol_consecutive_losses
 )
 from telegram_notifier import TelegramNotifier
+from mini_app import MiniAppRequestHandler
 
 # Настройка логирования в файл и консоль
 logging.basicConfig(
@@ -89,23 +90,11 @@ logging.basicConfig(
 logger = logging.getLogger("MainBot")
 
 
-# Встроенный легковесный веб-сервер для облачных платформ (Render, Koyeb, GCP)
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK: Multi-Asset Trading Assistant (XAU, XAG, GBP, TECH, BRENT, NATGAS) is running 24/7\n")
-
-    def log_message(self, format, *args):
-        pass
-
-
 def start_health_server():
     """Запускает HTTP сервер в фоновом потоке для проверки работоспособности облаком."""
     port = int(os.getenv("PORT", "8080"))
     try:
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server = HTTPServer(("0.0.0.0", port), MiniAppRequestHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         logger.info(f"Встроенный веб-сервер проверки здоровья запущен на порту {port}")

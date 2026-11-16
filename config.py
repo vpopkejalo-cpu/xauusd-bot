@@ -22,6 +22,11 @@ else:
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# Optional explicit Telegram user ID allowed to manage trades in the Mini App.
+# When omitted, a positive private-chat TELEGRAM_CHAT_ID is used.
+TELEGRAM_OWNER_USER_ID = os.getenv("TELEGRAM_OWNER_USER_ID", "").strip()
+# Set this for custom hosting; on Render the public service URL is detected automatically.
+MINI_APP_URL = os.getenv("MINI_APP_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip().rstrip("/")
 
 # Ключи для новостного анализа (опциональны — бот работает без них через Google RSS)
 # Finnhub: https://finnhub.io — бесплатный план 60 запросов/мин

@@ -21,6 +21,7 @@ from typing import Optional, Dict, Any, List
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    MINI_APP_URL,
     SYMBOL,
     SYMBOLS,
     SYMBOL_NAMES,
@@ -50,6 +51,14 @@ logger = logging.getLogger(__name__)
 
 # Часовой пояс пользователя (Молдова)
 _USER_TZ = "Europe/Chisinau"
+
+
+def _mini_app_trade_url(signal_id: int) -> Optional[str]:
+    """Build an HTTPS deep link to the trade editor when hosting is configured."""
+    if not MINI_APP_URL.startswith("https://"):
+        return None
+    from urllib.parse import urlencode
+    return f"{MINI_APP_URL}/miniapp?{urlencode({'trade_id': int(signal_id)})}"
 
 
 def _utc_to_local_hhmm(utc_iso: str) -> str:
@@ -134,14 +143,18 @@ class TelegramNotifier:
 
     @staticmethod
     def _trade_markup(signal_id: int) -> Dict:
-        return {"inline_keyboard": [
+        keyboard = [
             [
                 {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{signal_id}"},
                 {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{signal_id}"}
             ],
             [{"text": "✏️ Изменить Entry/TP/SL", "callback_data": f"levels_{signal_id}"}],
             [{"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{signal_id}"}]
-        ]}
+        ]
+        app_url = _mini_app_trade_url(signal_id)
+        if app_url:
+            keyboard.insert(1, [{"text": "📱 Управлять сделкой", "web_app": {"url": app_url}}])
+        return {"inline_keyboard": keyboard}
 
     @staticmethod
     def _trade_widget_html() -> str:
@@ -348,16 +361,22 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
     @staticmethod
     def _parse_trade_levels(text: str):
-        number = r"(-?\d+(?:[.,]\d+)?)"
+        # Telegram clients may insert regular, non-breaking, or narrow no-break
+        # spaces as thousands separators when copying formatted prices.
+        number = r"(-?\d(?:[\d\s\u00a0\u202f]*\d)?(?:[.,]\d+)?)"
         entry_match = re.search(rf"\b(?:ENTRY|ВХОД)\s*[:= ]\s*{number}", text, re.IGNORECASE)
         tp_match = re.search(rf"\bTP\s*[:= ]\s*{number}", text, re.IGNORECASE)
         sl_match = re.search(rf"\bSL\s*[:= ]\s*{number}", text, re.IGNORECASE)
         if not tp_match or not sl_match:
             return None
         try:
-            entry = float(entry_match.group(1).replace(",", ".")) if entry_match else None
-            tp = float(tp_match.group(1).replace(",", "."))
-            sl = float(sl_match.group(1).replace(",", "."))
+            def parse_number(match):
+                raw = re.sub(r"[\s\u00a0\u202f]", "", match.group(1))
+                return float(raw.replace(",", "."))
+
+            entry = parse_number(entry_match) if entry_match else None
+            tp = parse_number(tp_match)
+            sl = parse_number(sl_match)
             if ((entry is not None and (not math.isfinite(entry) or entry <= 0))
                     or not math.isfinite(tp) or tp <= 0 or not math.isfinite(sl) or sl <= 0):
                 return None
@@ -947,18 +966,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                     "<i>👆 Нажмите на цитату-ответ вверху этого сообщения, чтобы Telegram перенес вас прямо к первому сигналу!</i>\n\n"
                 "👇 <b>Либо укажите фактические Entry/TP/SL или результат:</b>"
                 )
-                markup = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "🏆 Закрыл в плюс (+TP)", "callback_data": f"win_{sig_id}"},
-                            {"text": "🛑 Закрыл в минус (-SL)", "callback_data": f"loss_{sig_id}"}
-                        ],
-                        [{"text": "✏️ Изменить Entry/TP/SL", "callback_data": f"levels_{sig_id}"}],
-                        [
-                            {"text": "✖️ Сбросить / Закрыть в 0", "callback_data": f"manual_{sig_id}"}
-                        ]
-                    ]
-                }
+                markup = self._trade_markup(sig_id)
             else:
                 status_ru = {
                     "TP_HIT": "✅ Закрыта в плюс (TP)",

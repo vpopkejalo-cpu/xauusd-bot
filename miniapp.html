@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#101827">
+  <title>Управление сделкой</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1220;--panel:#121d2d;--panel2:#19263a;--line:#29384d;--text:#edf3fb;--muted:#93a4ba;--blue:#57a6ff;--green:#37d6a0;--red:#ff7180;--gold:#ffc96b}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% -15%,#1d3555 0,transparent 48%),var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;padding:calc(18px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));}
+    .wrap{max-width:520px;margin:0 auto}.head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 2px 18px}.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--blue);font-weight:800}.title{font-size:24px;font-weight:800;margin-top:4px;letter-spacing:-.04em}.badge{padding:8px 11px;border:1px solid #245b83;background:#122d47;color:#8dc9ff;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}.card{background:linear-gradient(145deg,rgba(25,38,58,.97),rgba(16,26,41,.97));border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 20px 55px #0005}.instrument{font-size:18px;font-weight:750}.sub{color:var(--muted);font-size:13px;margin-top:5px}.direction{display:inline-flex;align-items:center;gap:7px;margin-top:14px;padding:7px 10px;border-radius:10px;background:#13283b;font-size:12px;font-weight:800;color:var(--green)}.direction.sell{color:var(--red);background:#351f2a}.section{margin-top:22px}.section-title{font-size:12px;font-weight:800;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;margin:0 0 11px}.fields{display:grid;gap:11px}.field{display:grid;grid-template-columns:1fr minmax(130px,46%);align-items:center;gap:10px;padding:12px 13px;background:#0d1726;border:1px solid #26364b;border-radius:14px}.field label{font-size:13px;font-weight:700}.hint{display:block;color:var(--muted);font-size:11px;margin-top:4px}.field input{width:100%;background:#17263a;color:var(--text);border:1px solid #324761;border-radius:10px;padding:11px 10px;font-size:16px;font-weight:750;text-align:right;outline:none}.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #57a6ff22}.entry label{color:var(--blue)}.tp label{color:var(--green)}.sl label{color:var(--red)}.levels-note{font-size:12px;color:var(--muted);line-height:1.45;margin:10px 2px 0}.save{width:100%;margin-top:18px;border:0;border-radius:14px;padding:15px;background:linear-gradient(100deg,#2586f5,#45a5ff);color:#fff;font-size:15px;font-weight:850;box-shadow:0 9px 24px #2586f544}.save:disabled{opacity:.55}.message{min-height:18px;text-align:center;font-size:13px;color:var(--green);margin:10px 0 0}.message.error{color:var(--red)}.baseline{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:12px;padding:11px 2px 0}.baseline strong{color:#c7d4e4;font-weight:700}.history{margin-top:20px}.history-list{display:grid;gap:9px}.history-item{border:1px solid #27364a;background:#101a29;border-radius:13px;padding:11px 12px}.history-time{font-size:11px;color:var(--muted);margin-bottom:7px}.history-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.history-cell{font-size:11px;color:var(--muted)}.history-cell b{display:block;color:var(--text);font-size:12px;margin-top:4px;word-break:break-all}.empty{border:1px dashed #33445b;border-radius:13px;padding:14px;text-align:center;color:var(--muted);font-size:12px}.footer{text-align:center;color:#72839a;font-size:11px;line-height:1.5;margin:15px 12px 0}.loading{opacity:.65;pointer-events:none}
+    @media(max-width:360px){.card{padding:14px}.field{grid-template-columns:1fr 44%}.title{font-size:21px}.field input{font-size:14px}}
+  </style>
+</head>
+<body>
+  <main class="wrap" id="app">
+    <header class="head"><div><div class="eyebrow">Trade desk · управление</div><div class="title" id="title">Загрузка сделки…</div></div><div class="badge" id="status">ПРОВЕРКА</div></header>
+    <section class="card">
+      <div class="instrument" id="symbol">Подключаемся к Telegram</div>
+      <div class="sub" id="tradeMeta">Безопасная форма редактирования уровней</div>
+      <div class="direction" id="direction">● —</div>
+      <div class="section">
+        <h2 class="section-title">Актуальные уровни</h2>
+        <div class="fields">
+          <div class="field entry"><div><label for="entry">Entry · вход</label><span class="hint">Фактическая цена входа</span></div><input id="entry" name="entry" inputmode="decimal" autocomplete="off"></div>
+          <div class="field tp"><div><label for="tp">TP · take profit</label><span class="hint">Новая цель сделки</span></div><input id="tp" name="tp" inputmode="decimal" autocomplete="off"></div>
+          <div class="field sl"><div><label for="sl">SL · stop loss</label><span class="hint">Новый уровень защиты</span></div><input id="sl" name="sl" inputmode="decimal" autocomplete="off"></div>
+        </div>
+        <div class="levels-note" id="orderHint">Проверьте уровни перед сохранением. Их можно менять повторно — каждая правка останется в истории.</div>
+        <div class="baseline"><span>Уровни из сигнала</span><strong id="original">TP — · SL —</strong></div>
+        <button class="save" id="save" type="button">Сохранить уровни</button>
+        <div class="message" id="message" role="status"></div>
+      </div>
+      <div class="section history"><h2 class="section-title">История изменений</h2><div class="history-list" id="history"></div></div>
+    </section>
+    <div class="footer">Каждое сохранение записывается в журнал сделки.<br>Уровни сохраняются только пока сделка открыта.</div>
+  </main>
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const params = new URLSearchParams(location.search);
+  const tradeId = Number(params.get('trade_id'));
+  const $ = id => document.getElementById(id);
+  if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#0b1220'); tg.setBackgroundColor('#0b1220'); } catch (_) {} }
+  const initData = tg ? tg.initData : '';
+  let trade = null;
+  const number = value => Number(String(value).trim().replace(/\s/g, '').replace(',', '.'));
+  const price = value => new Intl.NumberFormat('ru-RU',{maximumFractionDigits:8}).format(Number(value));
+  function showMessage(text, error=false) { $('message').textContent=text; $('message').className='message'+(error?' error':''); }
+  async function request(action, values={}) {
+    const response = await fetch('/api/miniapp/trade', {method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':initData},body:JSON.stringify({action,trade_id:tradeId,...values})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Не удалось связаться с ботом');
+    return data;
+  }
+  function renderHistory(rows) {
+    const root=$('history'); root.replaceChildren();
+    if (!rows || !rows.length) { const empty=document.createElement('div');empty.className='empty';empty.textContent='Пока уровни не менялись. Здесь появится история каждой правки.';root.append(empty);return; }
+    [...rows].reverse().forEach(item => {
+      const card=document.createElement('article');card.className='history-item';
+      const time=document.createElement('div');time.className='history-time';
+      const raw=item.changed_at || ''; const date=new Date(raw.endsWith('Z')?raw:raw+'Z');
+      time.textContent=Number.isNaN(date.getTime())?raw:date.toLocaleString('ru-RU',{dateStyle:'medium',timeStyle:'short'});
+      const grid=document.createElement('div');grid.className='history-grid';
+      [['Entry',item.old_actual_entry_price,item.new_actual_entry_price],['TP',item.old_take_profit,item.new_take_profit],['SL',item.old_stop_loss,item.new_stop_loss]].forEach(([label,oldValue,newValue])=>{
+        const cell=document.createElement('div');cell.className='history-cell';cell.append(document.createTextNode(label));
+        const bold=document.createElement('b');bold.textContent=(oldValue==null?'—':price(oldValue))+' → '+(newValue==null?'—':price(newValue));cell.append(bold);grid.append(cell);
+      });
+      card.append(time,grid);root.append(card);
+    });
+  }
+  function render(data) {
+    trade=data;
+    $('title').textContent='Сделка #'+data.id;
+    $('symbol').textContent=data.symbol;
+    $('tradeMeta').textContent='Вход по сигналу: '+price(data.reference_entry);
+    const buy=data.direction==='BUY';
+    $('direction').textContent=(buy?'↗  BUY · ПОКУПКА':'↘  SELL · ПРОДАЖА');
+    $('direction').className='direction'+(buy?'':' sell');
+    $('status').textContent=data.status==='OPEN'?'В РЫНКЕ':data.status;
+    $('entry').value=data.entry; $('tp').value=data.tp; $('sl').value=data.sl;
+    $('original').textContent='TP '+price(data.initial_tp)+' · SL '+price(data.initial_sl);
+    const open=data.status==='OPEN';
+    $('save').disabled=!open;
+    if (!open) { $('save').textContent='Сделка уже закрыта'; showMessage('Уровни закрытой сделки доступны только для просмотра.'); }
+    renderHistory(data.history);
+  }
+  $('save').addEventListener('click', async () => {
+    const entry=number($('entry').value), tp=number($('tp').value), sl=number($('sl').value);
+    if (![entry,tp,sl].every(value=>Number.isFinite(value)&&value>0)) return showMessage('Введите три положительные цены.',true);
+    if (!(trade.direction==='BUY'?sl<entry&&entry<tp:tp<entry&&entry<sl)) return showMessage('Проверьте порядок Entry, TP и SL для '+trade.direction+'.',true);
+    $('save').disabled=true; $('app').classList.add('loading'); showMessage('Сохраняем уровни и историю…');
+    try { const result=await request('update',{entry,tp,sl}); render(result.trade); showMessage(result.message); if(tg)tg.HapticFeedback&&tg.HapticFeedback.notificationOccurred('success'); }
+    catch(error) { showMessage(error.message,true); if(tg)tg.HapticFeedback&&tg.HapticFeedback.notificationOccurred('error'); }
+    finally { $('app').classList.remove('loading'); if(trade&&trade.status==='OPEN')$('save').disabled=false; }
+  });
+  (async () => {
+    if (!tradeId || !Number.isSafeInteger(tradeId)) { showMessage('В ссылке не указан номер сделки.',true); $('symbol').textContent='Не удалось открыть сделку'; return; }
+    if (!tg || !initData) { showMessage('Откройте форму через Telegram, нажав кнопку в карточке сделки.',true); $('symbol').textContent='Нужен запуск из Telegram'; return; }
+    try { const data=await request('get'); render(data.trade); }
+    catch(error) { showMessage(error.message,true); $('symbol').textContent='Не удалось загрузить сделку'; }
+  })();
+})();
+</script>
+</body>
+</html>
