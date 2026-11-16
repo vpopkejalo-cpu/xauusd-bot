@@ -129,6 +129,8 @@ class TelegramNotifier:
         self.is_polling = False
         self.latest_prices: Dict[str, float] = {}
         self.pending_level_updates: Dict[Any, Dict[str, Any]] = {}
+        self._widget_chat_type_checked = False
+        self._widget_chat_type: Optional[str] = None
 
     @staticmethod
     def _trade_markup(signal_id: int) -> Dict:
@@ -176,10 +178,35 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             data = response.json()
             if response.ok and data.get("ok"):
                 return data["result"]["message_id"]
+            if data.get("description") == "Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED":
+                chat_type = self._probe_widget_chat_type()
+                if chat_type == "private":
+                    hint = "чат личный; проверьте доступность функции для бота на стороне Telegram"
+                elif chat_type:
+                    hint = "рабочий Bot API пока разрешает виджеты только в личных чатах"
+                else:
+                    hint = "тип целевого чата проверить не удалось"
+                logger.warning("sendWidget отклонён: %s; chat_type=%s; html_bytes=%s; chat_id и токен скрыты",
+                               hint, chat_type or "unknown", len(payload["html"].encode("utf-8")))
             logger.warning("sendWidget недоступен (%s): %s; использую обычную карточку", response.status_code, data)
         except Exception as exc:
             logger.warning("Ошибка sendWidget, использую обычную карточку: %s", exc)
         return None
+
+    def _probe_widget_chat_type(self) -> Optional[str]:
+        """Reads only the destination chat type, once, to diagnose Telegram eligibility errors."""
+        if self._widget_chat_type_checked:
+            return self._widget_chat_type
+        self._widget_chat_type_checked = True
+        try:
+            response = requests.get(f"{self.base_url}/getChat", params={"chat_id": self.chat_id}, timeout=5)
+            result = response.json()
+            if response.ok and result.get("ok"):
+                self._widget_chat_type = (result.get("result") or {}).get("type")
+        except Exception as exc:
+            # Never include the request URL: it contains the bot token.
+            logger.debug("Не удалось определить тип чата для диагностики виджета (%s)", type(exc).__name__)
+        return self._widget_chat_type
 
     def _handle_widget_query(self, query: Dict[str, Any]):
         """Проверяет владельца карточки, применяет действие и синхронизирует её состояние."""
