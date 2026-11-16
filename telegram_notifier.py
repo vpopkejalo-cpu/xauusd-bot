@@ -101,7 +101,9 @@ def get_main_keyboard(is_paused: bool = False) -> Dict:
         [{"text": "🤖 Разбор ИИ"}, {"text": "🩺 Проверка систем"}],
     ]
     if MINI_APP_URL.startswith("https://"):
-        keyboard.append([{"text": "📱 Кабинет трейдера", "web_app": {"url": f"{MINI_APP_URL}/miniapp"}}])
+        # Reply-keyboard Mini Apps are intended for sendData input flows and do
+        # not provide the signed user context required by our authenticated API.
+        keyboard.append([{"text": "📱 Кабинет трейдера"}])
     return {
         "keyboard": keyboard,
         "resize_keyboard": True,
@@ -650,6 +652,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
     def send_startup_notification(self, interval: str, min_prob: float, symbols: Optional[list] = None):
         """Отправляет тестовое приветственное сообщение при старте бота с нативной клавиатурой."""
+        self._configure_mini_app_menu_button()
         sym_list = symbols or [SYMBOL]
         display_syms = "\n".join([f"• <b>{SYMBOL_NAMES.get(s, s)}</b>" for s in sym_list])
         paused = is_bot_paused()
@@ -672,6 +675,32 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             "• <b>🩺 Проверка систем</b> — экспресс-тест всех API, весов ML и базы данных"
         )
         return self.send_raw_message(message, reply_markup=get_main_keyboard(paused))
+
+    def _configure_mini_app_menu_button(self):
+        """Use Telegram's menu-button launch, which provides signed initData."""
+        if not self.token or not self.chat_id or not MINI_APP_URL.startswith("https://"):
+            return False
+        try:
+            response = requests.post(
+                f"{self.base_url}/setChatMenuButton",
+                json={
+                    "chat_id": self.chat_id,
+                    "menu_button": {
+                        "type": "web_app",
+                        "text": "Кабинет трейдера",
+                        "web_app": {"url": f"{MINI_APP_URL}/miniapp"},
+                    },
+                },
+                timeout=10,
+            )
+            result = response.json()
+            if response.ok and result.get("ok"):
+                logger.info("Кнопка Mini App настроена в меню личного чата Telegram")
+                return True
+            logger.warning("Не удалось настроить кнопку Mini App в меню Telegram: %s", result.get("description", response.status_code))
+        except Exception as exc:
+            logger.warning("Не удалось настроить кнопку Mini App в меню Telegram: %s", exc)
+        return False
 
     def send_trade_signal(
         self,
@@ -1104,8 +1133,22 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         if self._apply_level_update_message(msg):
             return
 
+        # The reply-keyboard item is a text launcher; the actual authenticated
+        # Mini App is opened from an inline button or Telegram's menu button.
+        if "кабинет трейдера" in lower_text or "мини прилож" in lower_text:
+            if MINI_APP_URL.startswith("https://"):
+                self.send_raw_message(
+                    "📱 <b>Кабинет трейдера</b>\nОткройте приложение кнопкой ниже или через кнопку меню рядом с полем ввода.",
+                    reply_markup={"inline_keyboard": [[{
+                        "text": "Открыть кабинет трейдера",
+                        "web_app": {"url": f"{MINI_APP_URL}/miniapp"},
+                    }]]},
+                )
+            else:
+                self.send_raw_message("Mini App недоступен: не настроен HTTPS-адрес.")
+
         # 1. Кнопка "📊 Статус Бота"
-        if "статус" in lower_text:
+        elif "статус" in lower_text:
             paused = is_bot_paused()
             status_badge = "⏸ НА ПАУЗЕ (Остановлен вами)" if paused else "🟢 АКТИВЕН И СКАНИРУЕТ РЫНОК"
 
