@@ -204,7 +204,25 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                     return self._send_json(400, {"error": "Неизвестный период отчёта"})
                 from report_generator import generate_diagnostics_report
                 report = generate_diagnostics_report(days=days)
-                return self._send_json(200, {"report": report})
+                delivered = 0
+                delivery_total = 3
+                notifier = self.notifier
+                if notifier:
+                    files = (
+                        ("txt_content", "txt_filename", "🧾 Диагностический отчёт"),
+                        ("csv_content", "csv_filename", "📊 Сделки CSV"),
+                        ("analysis_csv_content", "analysis_csv_filename", "🔬 Анализ свечей CSV"),
+                    )
+                    for content_key, filename_key, caption in files:
+                        if notifier.send_document(
+                            report.get(content_key, ""), report.get(filename_key, "report.txt"),
+                            caption=f"{caption} · период: {days} дн.",
+                        ):
+                            delivered += 1
+                return self._send_json(200, {
+                    "report": report,
+                    "chat_delivery": {"sent": delivered, "total": delivery_total},
+                })
 
             if action == "ai_analysis":
                 days = int(payload.get("days", 1))
