@@ -11,7 +11,12 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_OWNER_USER_ID
-from database import get_signal_by_id, get_signal_level_history, update_signal_trade_values
+from database import (
+    get_signal_by_id,
+    get_signal_level_history,
+    update_signal_status,
+    update_signal_trade_values,
+)
 
 logger = logging.getLogger(__name__)
 _HTML_PATH = Path(__file__).with_name("miniapp.html")
@@ -59,6 +64,8 @@ def _trade_payload(signal_id: int):
         "sl": float(signal["stop_loss"]),
         "initial_tp": float(signal.get("initial_take_profit") or signal["take_profit"]),
         "initial_sl": float(signal.get("initial_stop_loss") or signal["stop_loss"]),
+        "exit_price": float(signal["exit_price"]) if signal.get("exit_price") is not None else None,
+        "pnl": float(signal["pnl"]) if signal.get("pnl") is not None else None,
         "entered": bool(signal.get("entered_at")),
         "history": get_signal_level_history(signal_id),
     }
@@ -101,6 +108,35 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(404, {"error": "Сделка не найдена"})
             if payload.get("action") == "get":
                 return self._send_json(200, {"trade": _trade_payload(signal_id)})
+            if payload.get("action") == "close":
+                if signal.get("status") != "OPEN":
+                    return self._send_json(409, {"error": "Сделка уже закрыта"})
+                intent = payload.get("status")
+                if intent not in ("TP_HIT", "SL_HIT", "MANUAL_CLOSE"):
+                    return self._send_json(400, {"error": "Выберите результат закрытия"})
+                exit_price = float(payload["exit_price"])
+                entry = float(signal.get("actual_entry_price") or signal.get("entry_price") or 0)
+                if not math.isfinite(exit_price) or exit_price <= 0 or entry <= 0:
+                    return self._send_json(400, {"error": "Введите положительную цену выхода"})
+                move = exit_price - entry
+                pnl = move if str(signal.get("direction", "BUY")).upper() == "BUY" else -move
+                final_status = intent
+                if intent == "TP_HIT" and pnl < 0:
+                    final_status = "SL_HIT"
+                elif intent == "SL_HIT" and pnl > 0:
+                    final_status = "TP_HIT"
+                elif intent in ("TP_HIT", "SL_HIT") and pnl == 0:
+                    final_status = "MANUAL_CLOSE"
+                if not update_signal_status(
+                    signal_id, final_status, exit_price, pnl,
+                    source=f"telegram_mini_app_{intent.lower()}",
+                    pnl_basis="signed_price_move_estimate",
+                ):
+                    return self._send_json(409, {"error": "Сделка уже закрылась; результат не перезаписан"})
+                return self._send_json(200, {
+                    "message": "Закрытие записано. Показано изменение цены, не денежный PnL брокера.",
+                    "trade": _trade_payload(signal_id),
+                })
             if payload.get("action") != "update":
                 return self._send_json(400, {"error": "Неизвестное действие"})
             if signal.get("status") != "OPEN":
