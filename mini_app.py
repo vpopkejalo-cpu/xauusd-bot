@@ -8,7 +8,7 @@ import logging
 import math
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -18,6 +18,8 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_OWNER_USER_ID
 from database import (
     close_all_open_signals,
     get_analysis_logs,
+    get_active_goal_plan,
+    get_goal_plan_history,
     get_model_snapshots_history,
     log_operational_event,
     get_open_signals,
@@ -28,6 +30,7 @@ from database import (
     get_signal_level_history,
     get_today_signal_stats,
     get_winrate_stats,
+    get_reported_pnl_for_period,
     is_bot_paused,
     request_retrain,
     reset_kill_switch,
@@ -35,6 +38,7 @@ from database import (
     set_signal_entered_at,
     set_signal_position_quantity,
     set_signal_reported_pnl,
+    save_goal_plan,
     update_signal_status,
     update_signal_trade_values,
 )
@@ -42,6 +46,113 @@ from database import (
 logger = logging.getLogger(__name__)
 _HTML_PATH = Path(__file__).with_name("miniapp.html")
 _MAX_BODY_BYTES = 32_768
+_USER_TZ = ZoneInfo("Europe/Chisinau")
+
+
+def _business_days(start: date, end: date) -> int:
+    if end < start:
+        return 0
+    return sum(1 for offset in range((end - start).days + 1)
+               if (start + timedelta(days=offset)).weekday() < 5)
+
+
+def _local_day_utc_bounds(start: date, end_exclusive: date):
+    start_local = datetime.combine(start, datetime.min.time(), _USER_TZ)
+    end_local = datetime.combine(end_exclusive, datetime.min.time(), _USER_TZ)
+    return tuple(value.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+                 for value in (start_local, end_local))
+
+
+def _safe_pnl_summary(start: date, end_exclusive: date):
+    if end_exclusive <= start:
+        return {"closed_count": 0, "reported_count": 0, "by_currency": {}, "count_by_currency": {}}
+    start_utc, end_utc = _local_day_utc_bounds(start, end_exclusive)
+    return get_reported_pnl_for_period(start_utc, end_utc)
+
+
+def _goal_overview(plan):
+    today = datetime.now(_USER_TZ).date()
+    if not plan:
+        return {"plan": None, "today": today.isoformat()}
+
+    start = date.fromisoformat(str(plan["start_date"])[:10])
+    end = date.fromisoformat(str(plan["end_date"])[:10])
+    starting = float(plan["starting_balance"])
+    target = float(plan["target_balance"])
+    currency = str(plan.get("currency") or "USD").upper()
+    method = str(plan.get("method") or "compound")
+    total_days = _business_days(start, end)
+
+    def balance_at(day_index):
+        if total_days <= 0:
+            return starting
+        fraction = min(1.0, max(0.0, day_index / total_days))
+        if method == "compound":
+            return starting * ((target / starting) ** fraction)
+        return starting + (target - starting) * fraction
+
+    in_period = start <= today <= end
+    completed_days = _business_days(start, min(today, end)) if today >= start else 0
+    expected_cumulative = balance_at(completed_days) - starting
+    today_is_trading_day = in_period and today.weekday() < 5
+    expected_today = (balance_at(completed_days) - balance_at(max(0, completed_days - 1))
+                      if today_is_trading_day else None)
+
+    period_end = min(today, end) + timedelta(days=1) if today >= start else start
+    period_pnl = _safe_pnl_summary(start, period_end)
+    today_pnl = (_safe_pnl_summary(today, today + timedelta(days=1))
+                 if in_period else {"closed_count": 0, "reported_count": 0, "by_currency": {}, "count_by_currency": {}})
+
+    def currency_result(summary):
+        amounts = summary["by_currency"]
+        counts = summary["count_by_currency"]
+        return {
+            "actual_pnl": float(amounts.get(currency, 0.0)),
+            "matching_count": int(counts.get(currency, 0)),
+            "closed_count": int(summary["closed_count"]),
+            "complete": int(counts.get(currency, 0)) == int(summary["closed_count"]),
+            "other_currencies": {key: value for key, value in amounts.items() if key != currency},
+        }
+
+    today_result = currency_result(today_pnl)
+    period_result = currency_result(period_pnl)
+    today_progress = (today_result["actual_pnl"] / expected_today * 100
+                      if expected_today and expected_today > 0 else None)
+    cumulative_progress = (period_result["actual_pnl"] / expected_cumulative * 100
+                           if expected_cumulative > 0 else None)
+    if today < start:
+        state = "not_started"
+    elif today > end:
+        state = "finished"
+    elif today.weekday() >= 5:
+        state = "weekend"
+    else:
+        state = "active"
+
+    return {
+        "plan": {key: plan.get(key) for key in (
+            "id", "created_at", "start_date", "end_date", "starting_balance",
+            "target_balance", "currency", "method",
+        )},
+        "today": today.isoformat(),
+        "state": state,
+        "business_days_total": total_days,
+        "business_days_elapsed": completed_days,
+        "target_today": round(expected_today, 2) if expected_today is not None else None,
+        "target_cumulative": round(expected_cumulative, 2),
+        "today_actual": round(today_result["actual_pnl"], 2),
+        "today_closed_count": today_result["closed_count"],
+        "today_recorded_count": today_result["matching_count"],
+        "today_complete": today_result["complete"],
+        "today_other_currencies": today_result["other_currencies"],
+        "today_progress_pct": round(today_progress, 1) if today_progress is not None else None,
+        "period_actual": round(period_result["actual_pnl"], 2),
+        "period_closed_count": period_result["closed_count"],
+        "period_recorded_count": period_result["matching_count"],
+        "period_complete": period_result["complete"],
+        "period_other_currencies": period_result["other_currencies"],
+        "period_progress_pct": round(cumulative_progress, 1) if cumulative_progress is not None else None,
+    }
 
 
 def _authorized_user(init_data: str):
@@ -199,6 +310,8 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                     "paused": is_bot_paused(),
                     "today": get_today_signal_stats(),
                     "week": get_winrate_stats(7),
+                    "goal": _goal_overview(get_active_goal_plan()),
+                    "goal_history": get_goal_plan_history(limit=8),
                     "open_trades": [_signal_summary(item) for item in open_signals],
                     "recent_analyses": recent_analyses,
                     "prices": prices,
@@ -285,6 +398,32 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 from system_checker import run_full_system_check
                 result = run_full_system_check()
                 return self._send_json(200, {"text": _plain_text(result.get("report_text", "")), "errors": result.get("errors_count", 0)})
+
+            if action == "save_goal_plan":
+                try:
+                    start_date = date.fromisoformat(str(payload.get("start_date", "")))
+                    end_date = date.fromisoformat(str(payload.get("end_date", "")))
+                    starting_balance = _parse_user_number(payload.get("starting_balance"))
+                    target_balance = _parse_user_number(payload.get("target_balance"))
+                except (TypeError, ValueError):
+                    return self._send_json(400, {"error": "Проверьте даты и суммы начального/целевого баланса"})
+                if not all(math.isfinite(value) for value in (starting_balance, target_balance)):
+                    return self._send_json(400, {"error": "Баланс должен быть конечным числом"})
+                currency = str(payload.get("currency", "USD")).strip().upper()
+                method = str(payload.get("method", "compound")).strip().lower()
+                try:
+                    plan_id = save_goal_plan(
+                        start_date.isoformat(), end_date.isoformat(), starting_balance, target_balance,
+                        currency=currency, method=method,
+                    )
+                except ValueError as exc:
+                    return self._send_json(400, {"error": str(exc)})
+                plan = get_active_goal_plan()
+                return self._send_json(200, {
+                    "message": f"План №{plan_id} сохранён. Предыдущие версии остались в истории.",
+                    "goal": _goal_overview(plan),
+                    "goal_history": get_goal_plan_history(limit=8),
+                })
 
             if action == "pause":
                 paused = bool(payload.get("paused"))

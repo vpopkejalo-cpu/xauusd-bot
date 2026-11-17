@@ -8,6 +8,7 @@
 
 import os
 import json
+import re
 import sqlite3
 import pandas as pd
 from datetime import datetime
@@ -388,6 +389,21 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_operational_events_time ON operational_events (created_at, event_type)")
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS goal_plans (
+                id {"SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"},
+                created_at TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                starting_balance REAL NOT NULL,
+                target_balance REAL NOT NULL,
+                currency TEXT NOT NULL,
+                method TEXT NOT NULL,
+                is_active {"BOOLEAN" if IS_POSTGRES else "INTEGER"} NOT NULL DEFAULT TRUE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_goal_plans_active ON goal_plans (is_active, id)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_plans_single_active ON goal_plans (is_active) WHERE is_active = TRUE")
         if not IS_POSTGRES:
             cursor.execute("PRAGMA table_info(analysis_logs)")
             analysis_cols = [row[1] for row in cursor.fetchall()]
@@ -486,6 +502,93 @@ def get_operational_events(days: int = 1, limit: int = 1000) -> List[Dict[str, A
         except (TypeError, ValueError):
             row["details"] = {}
     return list(reversed(rows))
+
+
+def get_active_goal_plan() -> Optional[Dict[str, Any]]:
+    """Return the currently active version of the user's account-growth plan."""
+    with get_db() as cursor:
+        cursor.execute("SELECT * FROM goal_plans WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_goal_plan_history(limit: int = 12) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 100))
+    with get_db() as cursor:
+        cursor.execute(_adapt_sql("SELECT * FROM goal_plans ORDER BY id DESC LIMIT ?"), (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def save_goal_plan(
+    start_date: str,
+    end_date: str,
+    starting_balance: float,
+    target_balance: float,
+    currency: str = "USD",
+    method: str = "compound",
+    source: str = "telegram_mini_app",
+) -> int:
+    """Save a new immutable plan version and deactivate the previous one."""
+    from datetime import date
+
+    start = date.fromisoformat(str(start_date))
+    end = date.fromisoformat(str(end_date))
+    start_balance = float(starting_balance)
+    target = float(target_balance)
+    currency = str(currency).strip().upper()
+    method = str(method).strip().lower()
+    if end < start or (end - start).days > 366:
+        raise ValueError("Период должен быть не длиннее 367 календарных дней")
+    if not (start_balance > 0 and target > start_balance):
+        raise ValueError("Целевой баланс должен быть выше начального")
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise ValueError("Укажите трёхбуквенный код валюты")
+    if method not in ("linear", "compound"):
+        raise ValueError("Неизвестный способ расчёта цели")
+
+    with get_db() as cursor:
+        cursor.execute("UPDATE goal_plans SET is_active = FALSE WHERE is_active = TRUE")
+        sql = _adapt_sql("""INSERT INTO goal_plans
+            (created_at, start_date, end_date, starting_balance, target_balance, currency, method, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)""")
+        cursor.execute(sql, (datetime.utcnow().isoformat(), start.isoformat(), end.isoformat(),
+                             start_balance, target, currency, method))
+        if IS_POSTGRES:
+            cursor.execute("SELECT LASTVAL() AS id")
+            row = cursor.fetchone()
+            plan_id = int(row["id"])
+        else:
+            plan_id = int(cursor.lastrowid)
+        _record_operational_event(cursor, "goal_plan_saved", source, {
+            "plan_id": plan_id, "start_date": start.isoformat(), "end_date": end.isoformat(),
+            "starting_balance": start_balance, "target_balance": target,
+            "currency": currency, "method": method,
+        })
+        return plan_id
+
+
+def get_reported_pnl_for_period(start_utc: str, end_utc_exclusive: str) -> Dict[str, Any]:
+    """Aggregate manually reported realized P/L by currency for deals closed in a UTC interval."""
+    sql = _adapt_sql("""SELECT reported_pnl, reported_pnl_currency FROM signals
+        WHERE status IN ('TP_HIT', 'SL_HIT', 'MANUAL_CLOSE') AND closed_at >= ? AND closed_at < ?""")
+    with get_db() as cursor:
+        cursor.execute(sql, (str(start_utc), str(end_utc_exclusive)))
+        rows = [dict(row) for row in cursor.fetchall()]
+    by_currency: Dict[str, float] = {}
+    count_by_currency: Dict[str, int] = {}
+    for row in rows:
+        amount = row.get("reported_pnl")
+        if amount is None:
+            continue
+        currency = str(row.get("reported_pnl_currency") or "USD").upper()
+        by_currency[currency] = by_currency.get(currency, 0.0) + float(amount)
+        count_by_currency[currency] = count_by_currency.get(currency, 0) + 1
+    return {
+        "closed_count": len(rows),
+        "reported_count": sum(count_by_currency.values()),
+        "by_currency": {key: round(value, 2) for key, value in by_currency.items()},
+        "count_by_currency": count_by_currency,
+    }
 
 
 def get_recent_analyses(limit: int = 6) -> List[Dict[str, Any]]:
@@ -1121,7 +1224,8 @@ def get_model_snapshots_history(symbol: Optional[str] = None, limit: int = 100) 
             sql = _adapt_sql(f"SELECT {selection} FROM model_snapshots WHERE symbol = ? ORDER BY id DESC LIMIT ?")
             cursor.execute(sql, (str(symbol), limit))
         else:
-            cursor.execute(f"SELECT {selection} FROM model_snapshots ORDER BY id DESC LIMIT ?", (limit,))
+            sql = _adapt_sql(f"SELECT {selection} FROM model_snapshots ORDER BY id DESC LIMIT ?")
+            cursor.execute(sql, (limit,))
         rows = [_decode_model_snapshot(dict(row)) for row in cursor.fetchall()]
     return rows
 
