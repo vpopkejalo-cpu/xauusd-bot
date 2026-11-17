@@ -124,20 +124,116 @@ def get_winrate_period_keyboard() -> Dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "📅 Сегодня", "callback_data": "wr_1"},
-                {"text": "📆 7 Дней", "callback_data": "wr_7"},
-                {"text": "🗓 1 Месяц", "callback_data": "wr_30"}
+                {"text": "📅 Сегодня", "callback_data": "wr_today"},
+                {"text": "📅 Вчера", "callback_data": "wr_yesterday"},
+                {"text": "📆 7 Дней", "callback_data": "wr_7"}
             ],
             [
+                {"text": "🗓 1 Месяц", "callback_data": "wr_30"},
                 {"text": "📊 3 Месяца", "callback_data": "wr_90"},
-                {"text": "📈 6 Месяцев", "callback_data": "wr_180"},
-                {"text": "🏛 1 Год", "callback_data": "wr_365"}
-            ],
-            [
                 {"text": "🏆 За всё время", "callback_data": "wr_all"}
             ]
         ]
     }
+
+
+def get_daily_report_keyboard(target_date_key: str = "today") -> Dict:
+    """Возвращает кнопки действий под ежедневным отчетом."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🤖 AI-Разбор этого дня", "callback_data": f"ai_date_{target_date_key}"},
+                {"text": "📄 Логи и веса (CSV/TXT)", "callback_data": f"diag_date_{target_date_key}"}
+            ],
+            [
+                {"text": "📅 Отчет за Сегодня", "callback_data": "wr_today"},
+                {"text": "📅 Отчет за Вчера", "callback_data": "wr_yesterday"}
+            ],
+            [
+                {"text": "🔄 Обновить отчет", "callback_data": f"wr_{target_date_key}"},
+                {"text": "📆 Другие периоды", "callback_data": "wr_menu"}
+            ]
+        ]
+    }
+
+
+def _format_daily_report_message(stats: Dict[str, Any], date_label: str = "Сегодня") -> str:
+    """Форматирует красивый и прозрачный отчет за день с учетом овернайт-сделок."""
+    winrate = stats.get("winrate", 0.0)
+    finished_cnt = stats.get("finished", 0)
+    rating = format_efficiency_rating(winrate, finished_cnt)
+    pnl_val = stats.get("total_pnl", 0.0)
+    pnl_sign = f"+{pnl_val:.2f}" if pnl_val >= 0 else f"{pnl_val:.2f}"
+    actual_pnl_text = _format_actual_pnl_stats(stats)
+    actual_winrate = stats.get("actual_winrate")
+    actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
+
+    overnight_open = stats.get("overnight_open", 0)
+    overnight_closed = stats.get("overnight_closed", 0)
+    overnight_total = stats.get("overnight_total", 0)
+
+    overnight_block = ""
+    if overnight_total > 0:
+        overnight_block = (
+            f"🌙 <b>Перешли на овернайт:</b> {overnight_total} "
+            f"(в рынке: {overnight_open}, закрыто на след. день: {overnight_closed})\n"
+        )
+    elif stats.get("open_count", 0) > 0:
+        overnight_block = f"⏳ <b>Сейчас в рынке (Open):</b> {stats['open_count']}\n"
+
+    report = (
+        f"📊 <b>ОТЧЕТ ЗА СЕССИЮ: {date_label.upper()}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>Точность TP/SL:</b> <b>{winrate}%</b>\n"
+        f"🏅 <b>Оценка качества:</b> {rating}\n\n"
+        f"📊 <b>Всего открыто сигналов:</b> {stats['total_signals']}\n"
+        f"✅ <b>Take Profit:</b> {stats['wins']}\n"
+        f"🛑 <b>Stop Loss:</b> {stats['losses']}\n"
+        f"✖️ <b>Сброшено / в 0:</b> {stats['manual']}\n"
+        f"{overnight_block}\n"
+        f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
+        f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
+        f"📈 <b>Прибыльность по факту:</b> {actual_winrate_text}\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    # Список сделок сессии
+    deals = stats.get("signals") or []
+    if deals:
+        report += "\n<b>📋 Сделки этой сессии (по дате открытия):</b>\n"
+        for s in deals:
+            sym = s.get('symbol', 'XAU/USD')
+            dir_emoji = "🟢" if s['direction'] == 'BUY' else "🔴"
+            status_text = {
+                "TP_HIT": "🏆 Take Profit",
+                "SL_HIT": "🛑 Stop Loss",
+                "OPEN": "⏳ В рынке (овернайт)",
+                "MANUAL_CLOSE": "✖️ Вручную",
+                "SKIPPED": "⏭ Пропущена"
+            }.get(s['status'], s['status'])
+
+            pnl_v = s.get("pnl")
+            pnl_str = f" ({pnl_v:+.2f} п.)" if pnl_v is not None and s['status'] in ("TP_HIT", "SL_HIT") else ""
+
+            # Пометка переноса овернайт
+            on_tag = ""
+            if s.get("closed_at"):
+                try:
+                    c_dt = datetime.fromisoformat(s["closed_at"])
+                    o_dt = datetime.fromisoformat(s["created_at"])
+                    if c_dt.date() > o_dt.date():
+                        on_tag = f" [🌙 закрыта {_utc_to_local_hhmm(s['closed_at'])}]"
+                except Exception:
+                    pass
+            elif s.get("status") == "OPEN":
+                on_tag = " [🌙 в рынке]"
+
+            time_str = _utc_to_local_hhmm(s.get('created_at', ''))
+            report += f"• #{s['id']} {dir_emoji} <b>{sym}</b> {s['direction']} @ {s['entry_price']} → {status_text}{pnl_str}{on_tag} [{time_str}]\n"
+    elif stats['total_signals'] == 0:
+        report += "\n<i>В эту сессию новых сделок не открывалось.</i>\n"
+
+    return report
 
 
 class TelegramNotifier:
@@ -914,66 +1010,145 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         msg_id = msg.get("message_id")
         orig_text = msg.get("text", "")
 
-        # 1. Выбор периода для расчета уровня качества / винрейта
+        # 0. Подтверждение паузы с активными сделками овернайт
+        if cb_data == "confirm_pause_active":
+            self.answer_callback_query(cb_id, "Бот переведен на паузу с открытыми позициями", show_alert=False)
+            self._execute_pause(has_active_deals=True)
+            return
+
+        # 0.1 Отмена паузы
+        if cb_data == "cancel_pause":
+            self.answer_callback_query(cb_id, "Пауза отменена", show_alert=False)
+            self.send_raw_message("▶️ <b>Пауза отменена.</b> Бот продолжает активное сканирование рынка в штатном режиме.", reply_markup=get_main_keyboard(is_bot_paused()))
+            return
+
+        # 0.2 Меню выбора периода отчетов
+        if cb_data == "wr_menu":
+            self.answer_callback_query(cb_id, "Выбор периода", show_alert=False)
+            self.send_raw_message("👇 <b>Выберите день или период для расчета отчета:</b>", reply_markup=get_winrate_period_keyboard())
+            return
+
+        # 0.3 AI-Разбор конкретного дня
+        if cb_data.startswith("ai_date_"):
+            date_key = cb_data.replace("ai_date_", "")
+            self.answer_callback_query(cb_id, f"Формирую AI-разбор ({date_key})...", show_alert=False)
+            self.send_raw_message(f"🧠 <i>AI-Аналитик изучает сделки и контекст ({date_key})... Пожалуйста, подождите.</i>")
+            try:
+                from ai_analyst import generate_ai_session_analysis
+                ai_review = generate_ai_session_analysis(target_date=date_key)
+                self.send_raw_message(ai_review, reply_markup=get_daily_report_keyboard(date_key))
+            except Exception as e_ai:
+                logger.error(f"Ошибка AI-разбора за {date_key}: {e_ai}", exc_info=True)
+                self.send_raw_message(f"❌ <b>Ошибка AI-разбора:</b> {e_ai}")
+            return
+
+        # 0.4 Диагностические файлы конкретного дня
+        if cb_data.startswith("diag_date_"):
+            date_key = cb_data.replace("diag_date_", "")
+            self.answer_callback_query(cb_id, f"Выгрузка файлов ({date_key})...", show_alert=False)
+            self.send_raw_message(f"⏳ <i>Формирую диагностические файлы за <b>{date_key}</b>...</i>")
+            try:
+                from report_generator import generate_diagnostics_report
+                report_data = generate_diagnostics_report(target_date=date_key)
+                self.send_document(
+                    file_content=report_data["txt_content"],
+                    filename=report_data["txt_filename"],
+                    caption=f"📋 <i>Диагностический отчет ({report_data.get('date_label') or date_key})</i>"
+                )
+                if report_data.get("csv_content"):
+                    self.send_document(
+                        file_content=report_data["csv_content"],
+                        filename=report_data["csv_filename"],
+                        caption=f"📊 <i>Таблица сделок CSV ({report_data.get('date_label') or date_key})</i>"
+                    )
+            except Exception as e_diag:
+                logger.error(f"Ошибка выгрузки файлов за {date_key}: {e_diag}", exc_info=True)
+                self.send_raw_message(f"❌ <b>Ошибка выгрузки файлов:</b> {e_diag}")
+            return
+
+        # 1. Выбор периода для расчета уровня качества / винрейта / отчета дня
         if cb_data.startswith("wr_"):
             period_str = cb_data.replace("wr_", "")
-            days_map = {
-                "1": (1, "Сегодня"),
-                "7": (7, "7 Дней"),
-                "30": (30, "1 Месяц"),
-                "90": (90, "3 Месяца"),
-                "180": (180, "6 Месяцев"),
-                "365": (365, "1 Год"),
-                "all": (None, "За всё время")
-            }
-            days_val, period_name = days_map.get(period_str, (None, "За всё время"))
-            stats = get_winrate_stats(days_val)
+            if period_str in ("today", "1"):
+                stats = get_winrate_stats(target_date="today")
+                report = _format_daily_report_message(stats, "Сегодня")
+                kb = get_daily_report_keyboard("today")
+                self.answer_callback_query(cb_id, f"Отчет за Сегодня: {stats['winrate']}%", show_alert=False)
+                self.send_raw_message(report, reply_markup=kb)
+                return
+            elif period_str in ("yesterday", "вчера"):
+                stats = get_winrate_stats(target_date="yesterday")
+                report = _format_daily_report_message(stats, "Вчера")
+                kb = get_daily_report_keyboard("yesterday")
+                self.answer_callback_query(cb_id, f"Отчет за Вчера: {stats['winrate']}%", show_alert=False)
+                self.send_raw_message(report, reply_markup=kb)
+                return
+            elif period_str.startswith("date_"):
+                date_val = period_str.replace("date_", "")
+                stats = get_winrate_stats(target_date=date_val)
+                report = _format_daily_report_message(stats, stats.get("period_name", date_val))
+                kb = get_daily_report_keyboard(date_val)
+                self.answer_callback_query(cb_id, f"Отчет за {stats.get('period_name', date_val)}", show_alert=False)
+                self.send_raw_message(report, reply_markup=kb)
+                return
+            else:
+                days_map = {
+                    "7": (7, "7 Дней"),
+                    "30": (30, "1 Месяц"),
+                    "90": (90, "3 Месяца"),
+                    "180": (180, "6 Месяцев"),
+                    "365": (365, "1 Год"),
+                    "all": (None, "За всё время")
+                }
+                days_val, period_name = days_map.get(period_str, (None, "За всё время"))
+                stats = get_winrate_stats(period_days=days_val)
 
-            winrate = stats["winrate"]
-            finished_cnt = stats.get("finished", 0)
-            rating = format_efficiency_rating(winrate, finished_cnt)
+                winrate = stats["winrate"]
+                finished_cnt = stats.get("finished", 0)
+                rating = format_efficiency_rating(winrate, finished_cnt)
 
-            pnl_val = stats["total_pnl"]
-            pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
-            actual_pnl_text = _format_actual_pnl_stats(stats)
-            actual_winrate = stats.get("actual_winrate")
-            actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
+                pnl_val = stats["total_pnl"]
+                pnl_sign = f"+{pnl_val:.2f}" if pnl_val >= 0 else f"{pnl_val:.2f}"
+                actual_pnl_text = _format_actual_pnl_stats(stats)
+                actual_winrate = stats.get("actual_winrate")
+                actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
 
-            report = (
-                f"🏆 <b>СТАТИСТИКА ВИНРЕЙТА</b>\n"
-                f"Период: <b>{period_name}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Точность TP/SL:</b> <b>{winrate}%</b>\n"
-                f"🏅 <b>Оценка точности:</b> {rating}\n\n"
-                f"📊 <b>Всего сигналов выдано:</b> {stats['total_signals']}\n"
-                f"✅ <b>Успешных (Take Profit):</b> {stats['wins']}\n"
-                f"🛑 <b>Убыточных (Stop Loss):</b> {stats['losses']}\n"
-                f"⌛ <b>Истекло по времени:</b> {stats['expired']}\n"
-                f"✖️ <b>Сброшено / Закрыто в 0:</b> {stats['manual']}\n"
-                f"⏳ <b>Сейчас в рынке (Open):</b> {stats['open_count']}\n\n"
-                f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
-                f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
-                f"📈 <b>Прибыльность по фактическому P/L:</b> {actual_winrate_text}\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>Точность TP/SL и денежный результат считаются отдельно.</i>"
-            )
-            open_sigs = get_open_signals()
-            inline_rows = []
-            if open_sigs:
-                report += "\n\n<b>⏳ Активные позиции в рынке:</b>\n"
-                for s in open_sigs:
-                    sym = s.get('symbol', 'XAU/USD')
-                    dir_txt = s['direction']
-                    report += f"• #{s['id']} <b>{sym}</b> {dir_txt} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})\n"
-                    inline_rows.append([
-                        {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
-                    ])
-                report += "\n<i>👇 Нажмите на кнопку сделки ниже, чтобы открыть её карточку:</i>"
+                report = (
+                    f"🏆 <b>СТАТИСТИКА ВИНРЕЙТА</b>\n"
+                    f"Период: <b>{period_name}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 <b>Точность TP/SL:</b> <b>{winrate}%</b>\n"
+                    f"🏅 <b>Оценка точности:</b> {rating}\n\n"
+                    f"📊 <b>Всего сигналов выдано:</b> {stats['total_signals']}\n"
+                    f"✅ <b>Успешных (Take Profit):</b> {stats['wins']}\n"
+                    f"🛑 <b>Убыточных (Stop Loss):</b> {stats['losses']}\n"
+                    f"⌛ <b>Истекло по времени:</b> {stats['expired']}\n"
+                    f"✖️ <b>Сброшено / Закрыто в 0:</b> {stats['manual']}\n"
+                    f"⏳ <b>Сейчас в рынке (Open):</b> {stats['open_count']}\n\n"
+                    f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
+                    f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
+                    f"📈 <b>Прибыльность по фактическому P/L:</b> {actual_winrate_text}\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Точность TP/SL и денежный результат считаются отдельно.</i>"
+                )
+                open_sigs = get_open_signals()
+                inline_rows = [
+                    [{"text": "📅 За Сегодня", "callback_data": "wr_today"}, {"text": "📅 За Вчера", "callback_data": "wr_yesterday"}],
+                    [{"text": "📆 Другие периоды", "callback_data": "wr_menu"}]
+                ]
+                if open_sigs:
+                    report += "\n\n<b>⏳ Активные позиции в рынке:</b>\n"
+                    for s in open_sigs:
+                        sym = s.get('symbol', 'XAU/USD')
+                        dir_txt = s['direction']
+                        report += f"• #{s['id']} <b>{sym}</b> {dir_txt} по <code>{s['entry_price']}</code> (TP: {s['take_profit']}, SL: {s['stop_loss']})\n"
+                        inline_rows.insert(0, [
+                            {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {dir_txt} → Карточка", "callback_data": f"goto_{s['id']}"}
+                        ])
 
-            self.answer_callback_query(cb_id, f"Винрейт за {period_name}: {winrate}%", show_alert=False)
-            reply_markup = {"inline_keyboard": inline_rows} if inline_rows else None
-            self.send_raw_message(report, reply_markup=reply_markup)
-            return
+                self.answer_callback_query(cb_id, f"Винрейт за {period_name}: {winrate}%", show_alert=False)
+                self.send_raw_message(report, reply_markup={"inline_keyboard": inline_rows})
+                return
 
         # 2. Сброс зависших сделок из кнопки статуса
         if cb_data == "action_reset_trades":
@@ -1144,6 +1319,80 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 reply_to_message_id=msg_id
             )
 
+    def _execute_pause(self, has_active_deals: bool = False):
+        """Переводит бота на паузу и отправляет структурированный отчет сессии."""
+        set_bot_paused(True)
+        open_sigs = get_open_signals()
+        active_cnt = len(open_sigs)
+
+        if has_active_deals and active_cnt > 0:
+            msg_text = (
+                "⏸ <b>БОТ ПОСТАВЛЕН НА ПАУЗУ С АКТИВНЫМИ СДЕЛКАМИ</b>\n\n"
+                "✅ Сканирование рынка приостановлено, новые сигналы ночью открываться не будут.\n"
+                f"🌙 <b>{active_cnt} открытые сделки переведены в овернайт</b> и продолжают работу в рынке.\n"
+                "📊 Все итоговые результаты этих сделок пойдут в зачет сессии <b>дня их открытия</b>.\n"
+                "😴 <i>Вы можете спокойно ложиться спать! Завтра сделки будут ждать вас в боте и Mini App.</i>\n\n"
+                "<i>Когда проснетесь, просто нажмите кнопку <b>▶️ Запустить бота</b> внизу экрана.</i>"
+            )
+        else:
+            msg_text = (
+                "⏸ <b>БОТ ПОСТАВЛЕН НА ПАУЗУ</b>\n\n"
+                "✅ Сканирование рынка приостановлено.\n"
+                "✅ Запросы к API остановлены.\n"
+                "🌙 Вы можете спокойно ложиться спать, ресурсы не тратятся!\n\n"
+                "<i>Когда проснетесь, просто нажмите кнопку <b>▶️ Запустить бота</b> внизу экрана.</i>"
+            )
+        self.send_raw_message(msg_text, reply_markup=get_main_keyboard(is_paused=True))
+
+        # Автоматически отправляем отчет за день (по местному времени)
+        try:
+            stats = get_winrate_stats(target_date="today")
+            today_report = _format_daily_report_message(stats, "Сегодня")
+            self.send_raw_message(today_report, reply_markup=get_daily_report_keyboard("today"))
+        except Exception as e:
+            logger.warning(f"Не удалось отправить статистику за день при паузе: {e}")
+
+        # Автоматически генерируем глубокий аналитический файл с весами модели и отправляем в чат
+        try:
+            from report_generator import generate_diagnostics_report
+            report_data = generate_diagnostics_report(days=1, target_date="today")
+            sig_count = report_data.get("signals_count", 0)
+
+            caption = (
+                "📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ (СЕГОДНЯ)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Сигналов в анализе: <b>{sig_count}</b>\n"
+                f"🎯 Винрейт: <b>{report_data.get('winrate')}%</b> | PnL: <b>{report_data.get('pnl_str')}</b>\n\n"
+                "🔍 <i>В прикрепленных файлах: полный расклад весов каждого индикатора, влияние новостей и динамика переобучения весов.</i>"
+            )
+            self.send_document(
+                file_content=report_data["txt_content"],
+                filename=report_data["txt_filename"],
+                caption=caption
+            )
+            if report_data.get("csv_content"):
+                self.send_document(
+                    file_content=report_data["csv_content"],
+                    filename=report_data["csv_filename"],
+                    caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
+                )
+            if report_data.get("analysis_csv_content"):
+                self.send_document(
+                    file_content=report_data["analysis_csv_content"],
+                    filename=report_data["analysis_csv_filename"],
+                    caption="🧭 <i>Журнал всех решений по свечам: признаки, фильтры, причины и версия ML-модели</i>"
+                )
+
+            # Автоматически отправляем рецензию AI-Аналитика
+            try:
+                from ai_analyst import generate_ai_session_analysis
+                ai_review = generate_ai_session_analysis(days=1, target_date="today")
+                self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_paused=True))
+            except Exception as e_ai:
+                logger.warning(f"Не удалось сформировать AI разбор при паузе: {e_ai}")
+        except Exception as e:
+            logger.error(f"Не удалось сформировать или отправить диагностический отчет при паузе: {e}", exc_info=True)
+
     def _handle_command(self, msg: Dict):
         text = msg.get("text", "").strip()
         lower_text = text.lower()
@@ -1249,115 +1498,36 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             self.send_raw_message(text_prompt, reply_markup=get_winrate_period_keyboard())
 
         # 3. Кнопка "⏸ Поставить на паузу" / "Стоп"
-        elif "пауз" in lower_text or lower_text in ("стоп", "stop"):
-            # Блокируем паузу если есть открытые сделки
+        elif "пауз" in lower_text or lower_text in ("стоп", "stop") or lower_text.startswith(("/pause", "/stop")):
             open_sigs = get_open_signals()
-            if open_sigs:
+            force_pause = "force" in lower_text or "принуд" in lower_text
+
+            if open_sigs and not force_pause:
                 deals_info = "\n".join([
-                    f"• #{s['id']} <b>{s.get('symbol', 'XAU/USD')}</b> {s['direction']} @ <code>{s['entry_price']}</code>"
+                    f"• #{s['id']} <b>{s.get('symbol', 'XAU/USD')}</b> {s['direction']} @ <code>{s['entry_price']}</code> "
+                    f"({_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))})"
                     for s in open_sigs
                 ])
-                block_msg = (
-                    "⚠️ <b>ПАУЗА НЕДОСТУПНА — ЕСТЬ АКТИВНЫЕ СДЕЛКИ!</b>\n\n"
-                    "Сначала закройте или сбросьте все открытые позиции:\n\n"
+                confirm_msg = (
+                    f"⚠️ <b>ВНИМАНИЕ: ЕСТЬ АКТИВНЫЕ СДЕЛКИ ({len(open_sigs)} шт.)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"Прямо сейчас в рынке находятся открытые позиции:\n\n"
                     f"{deals_info}\n\n"
-                    "👉 Нажмите на сделку ниже, чтобы перейти к её карточке, либо нажмите <b>🧹 Сброс сделок</b>:"
+                    "Вы можете поставить бота на паузу:\n"
+                    "✅ <b>Сканирование рынка и новые сигналы прекратятся</b> (ночью новые сделки открываться не будут, запросы API остановлены).\n"
+                    f"🌙 <b>Открытые позиции ({len(open_sigs)} шт.) останутся в рынке</b> (перейдут овернайт). Утром или позже вы сможете их закрыть либо они закроются по TP/SL.\n"
+                    "📊 Все результаты этих сделок пойдут в зачет сессии <b>дня их открытия</b>.\n\n"
+                    "<b>Подтверждаете перевод бота на паузу?</b>"
                 )
-                pause_btns = []
-                for s in open_sigs:
-                    sym = s.get('symbol', 'XAU/USD')
-                    pause_btns.append([
-                        {"text": f"🎯 #{s['id']} {_utc_to_local_hhmm(s.get('entered_at') or s.get('created_at',''))} {sym} {s['direction']} → Карточка", "callback_data": f"goto_{s['id']}"}
-                    ])
-                pause_btns.append([{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}])
-                self.send_raw_message(block_msg, reply_markup={"inline_keyboard": pause_btns})
+                pause_btns = [
+                    [{"text": f"⏸ Да, на паузу (перенести {len(open_sigs)} сдел. овернайт)", "callback_data": "confirm_pause_active"}],
+                    [{"text": "❌ Отмена (продолжить работу)", "callback_data": "cancel_pause"}],
+                    [{"text": "🧹 Сбросить зависшие сделки", "callback_data": "action_reset_trades"}]
+                ]
+                self.send_raw_message(confirm_msg, reply_markup={"inline_keyboard": pause_btns})
                 return
 
-            # Ставим бота на паузу
-            set_bot_paused(True)
-            msg_text = (
-                "⏸ <b>БОТ ПОСТАВЛЕН НА ПАУЗУ</b>\n\n"
-                "✅ Сканирование рынка приостановлено.\n"
-                "✅ Запросы к API остановлены.\n"
-                "🌙 Вы можете спокойно ложиться спать, ресурсы не тратятся!\n\n"
-                "<i>Когда проснетесь, просто нажмите кнопку <b>▶️ Запустить бота</b> внизу экрана.</i>"
-            )
-            self.send_raw_message(msg_text, reply_markup=get_main_keyboard(is_paused=True))
-
-            # Автоматически отправляем статистику винрейта за сегодня
-            try:
-                stats = get_winrate_stats(1)
-                winrate = stats["winrate"]
-                finished_cnt = stats.get("finished", 0)
-                rating = format_efficiency_rating(winrate, finished_cnt)
-
-                pnl_val = stats["total_pnl"]
-                pnl_sign = f"+{pnl_val}" if pnl_val >= 0 else f"{pnl_val}"
-                actual_pnl_text = _format_actual_pnl_stats(stats)
-                actual_winrate = stats.get("actual_winrate")
-                actual_winrate_text = f"{actual_winrate}% по {stats.get('actual_pnl_count', 0)} сделкам" if actual_winrate is not None else "нет данных"
-
-                today_report = (
-                    "📊 <b>ИТОГИ СЕГОДНЯШНЕГО ДНЯ:</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 <b>Точность TP/SL за день:</b> <b>{winrate}%</b>\n"
-                    f"🏅 <b>Оценка:</b> {rating}\n\n"
-                    f"📊 <b>Сигналов выдано:</b> {stats['total_signals']}\n"
-                    f"✅ <b>Take Profit:</b> {stats['wins']}\n"
-                    f"🛑 <b>Stop Loss:</b> {stats['losses']}\n"
-                    f"✖️ <b>Сброшено вручную:</b> {stats['manual']}\n\n"
-                    f"📏 <b>Движение цены:</b> <code>{pnl_sign} пунктов</code>\n"
-                    f"💵 <b>Фактический P/L:</b> <code>{actual_pnl_text}</code>\n"
-                    f"📈 <b>Прибыльность по фактическому P/L:</b> {actual_winrate_text}\n"
-                    "━━━━━━━━━━━━━━━━━━━\n"
-                    "<i>До встречи! 🌙</i>"
-                )
-                self.send_raw_message(today_report, reply_markup=get_main_keyboard(is_paused=True))
-            except Exception as e:
-                logger.warning(f"Не удалось отправить статистику за день при паузе: {e}")
-
-            # Автоматически генерируем глубокий аналитический файл с весами модели и отправляем в чат
-            try:
-                from report_generator import generate_diagnostics_report
-                report_data = generate_diagnostics_report(days=1)
-                sig_count = report_data.get("signals_count", 0)
-
-                caption = (
-                    "📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━\n"
-                    f"📊 Сигналов в анализе: <b>{sig_count}</b>\n"
-                    f"🎯 Винрейт: <b>{report_data.get('winrate')}%</b> | PnL: <b>{report_data.get('pnl_str')}</b>\n\n"
-                    f"☀️ До 17:00 (Европа): {report_data.get('day_signals', 0)} сигн. (Винрейт {report_data.get('day_winrate', 0)}%)\n"
-                    f"🌙 После 17:00 (США): {report_data.get('evening_signals', 0)} сигн. (Винрейт {report_data.get('evening_winrate', 0)}%)\n\n"
-                    "🔍 <i>В прикрепленных файлах: полный расклад весов каждого индикатора, влияние новостей, разбор поведения после 17:00 и динамика переобучения весов.</i>"
-                )
-                self.send_document(
-                    file_content=report_data["txt_content"],
-                    filename=report_data["txt_filename"],
-                    caption=caption
-                )
-                if report_data.get("csv_content"):
-                    self.send_document(
-                        file_content=report_data["csv_content"],
-                        filename=report_data["csv_filename"],
-                        caption="📊 <i>Табличный файл сделок и признаков (CSV для Excel / Google Sheets)</i>"
-                    )
-                if report_data.get("analysis_csv_content"):
-                    self.send_document(
-                        file_content=report_data["analysis_csv_content"],
-                        filename=report_data["analysis_csv_filename"],
-                        caption="🧭 <i>Журнал всех решений по свечам: признаки, фильтры, причины и версия ML-модели</i>"
-                    )
-
-                # Автоматически отправляем рецензию AI-Аналитика
-                try:
-                    from ai_analyst import generate_ai_session_analysis
-                    ai_review = generate_ai_session_analysis(days=1)
-                    self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_paused=True))
-                except Exception as e_ai:
-                    logger.warning(f"Не удалось сформировать AI разбор при паузе: {e_ai}")
-            except Exception as e:
-                logger.error(f"Не удалось сформировать или отправить диагностический отчет при паузе: {e}", exc_info=True)
+            self._execute_pause(has_active_deals=bool(open_sigs))
 
         # 4. Кнопка "▶️ Запустить бота" / "Старт"
         elif "запустить" in lower_text or lower_text in ("старт", "start", "/start"):
@@ -1393,16 +1563,51 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             reply = "🔓 <b>Аварийный Kill Switch сброшен вручную!</b>\nСканирование рынка и генерация сигналов разблокированы."
             self.send_raw_message(reply, reply_markup=get_main_keyboard(is_bot_paused()))
 
-        # 8. Кнопка "📄 Логи сделок" / /report / /logs
-        elif "лог" in lower_text or "отчет" in lower_text or lower_text in ("/report", "report", "/logs", "logs"):
+        # 7.1 Отчет за вчера / /yesterday / вчера
+        elif lower_text in ("/yesterday", "вчера", "yesterday") or "отчет за вчера" in lower_text or "итоги вчера" in lower_text or "винрейт вчера" in lower_text:
             try:
+                stats = get_winrate_stats(target_date="yesterday")
+                rep = _format_daily_report_message(stats, "Вчера")
+                self.send_raw_message(rep, reply_markup=get_daily_report_keyboard("yesterday"))
+            except Exception as e_y:
+                logger.error(f"Ошибка отчета за вчера: {e_y}", exc_info=True)
+                self.send_raw_message(f"❌ Ошибка формирования отчета за вчера: {e_y}", reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 7.2 Отчет за сегодня / /today / сегодня
+        elif lower_text in ("/today", "сегодня", "today") or "отчет за сегодня" in lower_text or "итоги сегодня" in lower_text:
+            try:
+                stats = get_winrate_stats(target_date="today")
+                rep = _format_daily_report_message(stats, "Сегодня")
+                self.send_raw_message(rep, reply_markup=get_daily_report_keyboard("today"))
+            except Exception as e_t:
+                logger.error(f"Ошибка отчета за сегодня: {e_t}", exc_info=True)
+                self.send_raw_message(f"❌ Ошибка формирования отчета за сегодня: {e_t}", reply_markup=get_main_keyboard(is_bot_paused()))
+
+        # 8. Кнопка "📄 Логи сделок" / /logs / /report
+        elif "лог" in lower_text or lower_text.startswith(("/report", "report", "/logs", "logs")):
+            parts = text.strip().split()
+            target_arg = parts[1] if len(parts) > 1 else None
+
+            # Если пользователь передал конкретную дату через команду, например: /report 2026-11-17 или /report yesterday
+            if target_arg and (re.match(r"^\d{4}-\d{2}-\d{2}$", target_arg) or target_arg.lower() in ("yesterday", "today", "вчера", "сегодня")):
+                try:
+                    stats = get_winrate_stats(target_date=target_arg)
+                    rep = _format_daily_report_message(stats, stats.get("period_name", target_arg))
+                    self.send_raw_message(rep, reply_markup=get_daily_report_keyboard(target_arg))
+                except Exception as ex_rep:
+                    self.send_raw_message(f"❌ Не удалось загрузить отчет за {target_arg}: {ex_rep}")
+                return
+
+            try:
+                target_date = "yesterday" if ("вчера" in lower_text or "yesterday" in lower_text) else ("today" if ("сегодня" in lower_text or "today" in lower_text) else None)
                 from report_generator import generate_diagnostics_report
-                self.send_raw_message("⏳ <i>Формирую подробный файл с весами модели и логами сделок...</i>", reply_markup=get_main_keyboard(is_bot_paused()))
-                report_data = generate_diagnostics_report(days=1)
+                label_txt = f"({target_date})" if target_date else "(свежая сессия)"
+                self.send_raw_message(f"⏳ <i>Формирую подробный файл с весами модели и логами сделок {label_txt}...</i>", reply_markup=get_main_keyboard(is_bot_paused()))
+                report_data = generate_diagnostics_report(days=1, target_date=target_date)
                 sig_count = report_data.get("signals_count", 0)
 
                 caption = (
-                    "📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ</b>\n"
+                    f"📋 <b>ГЛУБОКИЙ ДИАГНОСТИЧЕСКИЙ ОТЧЕТ ПО СДЕЛКАМ {report_data.get('date_label', '').upper()}</b>\n"
                     "━━━━━━━━━━━━━━━━━━━\n"
                     f"📊 Сигналов в анализе: <b>{sig_count}</b>\n"
                     f"🎯 Винрейт: <b>{report_data.get('winrate')}%</b> | PnL: <b>{report_data.get('pnl_str')}</b>\n\n"
@@ -1431,7 +1636,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 # Автоматически отправляем рецензию AI-Аналитика
                 try:
                     from ai_analyst import generate_ai_session_analysis
-                    ai_review = generate_ai_session_analysis(days=1)
+                    ai_review = generate_ai_session_analysis(days=1, target_date=target_date)
                     self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_bot_paused()))
                 except Exception as e_ai:
                     logger.warning(f"Не удалось сформировать AI разбор при запросе логов: {e_ai}")
@@ -1440,11 +1645,13 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 self.send_raw_message(f"❌ <b>Ошибка генерации отчета:</b> {e}", reply_markup=get_main_keyboard(is_bot_paused()))
 
         # 9. Кнопка "🤖 Разбор ИИ" / /ai
-        elif "разбор" in lower_text or "ии" in lower_text or lower_text in ("/ai", "ai", "analyst"):
+        elif "разбор" in lower_text or "ии" in lower_text or lower_text in ("/ai", "ai", "analyst") or lower_text.startswith("/ai"):
             try:
-                self.send_raw_message("🧠 <i>AI-Аналитик изучает паттерны последних сделок, веса модели и поведение рынка... Пожалуйста, подождите.</i>", reply_markup=get_main_keyboard(is_bot_paused()))
+                target_date = "yesterday" if ("вчера" in lower_text or "yesterday" in lower_text) else ("today" if ("сегодня" in lower_text or "today" in lower_text) else None)
+                date_label_str = "за Вчера" if target_date == "yesterday" else ("за Сегодня" if target_date == "today" else "")
+                self.send_raw_message(f"🧠 <i>AI-Аналитик изучает паттерны сделок, веса модели и поведение рынка {date_label_str}... Пожалуйста, подождите.</i>", reply_markup=get_main_keyboard(is_bot_paused()))
                 from ai_analyst import generate_ai_session_analysis
-                ai_review = generate_ai_session_analysis(days=1)
+                ai_review = generate_ai_session_analysis(days=1, target_date=target_date)
                 self.send_raw_message(ai_review, reply_markup=get_main_keyboard(is_bot_paused()))
             except Exception as e_ai:
                 logger.error(f"Ошибка при вызове AI-Аналитика: {e_ai}", exc_info=True)

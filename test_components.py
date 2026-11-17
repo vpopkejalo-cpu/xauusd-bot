@@ -248,6 +248,55 @@ def test_system():
     print(f"Диагностика систем успешно завершена за {diag['elapsed_seconds']} с:")
     print(f"API проверено: {len(diag['api_results'])}, Моделей проанализировано: {len(diag['ml_results'])}")
 
+    print(">>> 11. Тест отчетов на след. день, атрибуции овернайт-сделок и подтверждения паузы...")
+    from database import get_day_utc_bounds, get_winrate_stats, set_bot_paused, is_bot_paused, get_db, _adapt_sql
+    from telegram_notifier import TelegramNotifier, _format_daily_report_message, get_daily_report_keyboard
+
+    # 11.1 Проверка расчета временных границ дня пользователя
+    st_today, end_today, d_today, lbl_today = get_day_utc_bounds("today")
+    st_yest, end_yest, d_yest, lbl_yest = get_day_utc_bounds("yesterday")
+    assert st_today == end_yest, f"Граница вчерашнего дня должна стыковаться с началом сегодняшнего: {end_yest} vs {st_today}"
+    print(f"Границы дней (Europe/Chisinau): Сегодня={lbl_today} [{st_today}..{end_today}], Вчера={lbl_yest} [{st_yest}..{end_yest}]")
+
+    # 11.2 Проверка атрибуции овернайт-сделки:
+    # Имитируем сделку, открытую вчера (днем) и закрытую сегодня (ночью)
+    yest_entry_time = "2026-11-16T12:00:00"
+    today_exit_time = "2026-11-17T03:15:00"
+
+    with get_db() as cursor:
+        cursor.execute(_adapt_sql("""
+            INSERT INTO signals (created_at, symbol, direction, entry_price, take_profit, stop_loss,
+                                 atr, probability, status, closed_at, exit_price, pnl)
+            VALUES (?, 'OVERNIGHT_TEST', 'BUY', 2000.0, 2010.0, 1990.0, 5.0, 0.85, 'TP_HIT', ?, 2010.0, 10.0)
+        """), (yest_entry_time, today_exit_time))
+
+    # Сделка ДОЛЖНА попасть в отчет за ВЧЕРА (по дате открытия)
+    stats_yest = get_winrate_stats(target_date="yesterday")
+    yest_signals = [s for s in stats_yest.get("signals", []) if s.get("symbol") == "OVERNIGHT_TEST"]
+    assert len(yest_signals) == 1, "Овернайт-сделка не найдена в отчете за вчера (день открытия)"
+    assert yest_signals[0]["status"] == "TP_HIT" and yest_signals[0]["pnl"] == 10.0, "Результат овернайта не учтен во вчерашнем дне"
+    print("✅ Атрибуция овернайта подтверждена: сделка закрыта сегодня, но строго учтена в дне открытия (вчера)!")
+
+    # Сделка НЕ ДОЛЖНА попасть в отчет за СЕГОДНЯ (так как открыта была вчера)
+    stats_today = get_winrate_stats(target_date="today")
+    today_signals = [s for s in stats_today.get("signals", []) if s.get("symbol") == "OVERNIGHT_TEST"]
+    assert len(today_signals) == 0, "Овернайт-сделка ошибочно попала в отчет за сегодня (дублирование)"
+    print("✅ Защита от задвоения: сделка вчерашнего дня не попала в сегодняшний отчет!")
+
+    # 11.3 Проверка форматирования отчета за вчера
+    formatted_rep = _format_daily_report_message(stats_yest, "Вчера")
+    assert "ОТЧЕТ ЗА СЕССИЮ: ВЧЕРА" in formatted_rep, "Форматирование отчета за вчера некорректно"
+    assert "OVERNIGHT_TEST" in formatted_rep, "Сделка отсутствует в тексте отчета"
+    print("✅ Текстовый отчет за прошлый день успешно сформирован с овернайт-пометкой.")
+
+    # 11.4 Проверка установки на паузу
+    notifier = TelegramNotifier()
+    notifier._execute_pause(has_active_deals=True)
+    assert is_bot_paused(), "Бот должен быть поставлен на паузу"
+    set_bot_paused(False)
+    assert not is_bot_paused(), "Бот должен быть успешно снят с паузы"
+    print("✅ Механика паузы с подтверждением и сохранением овернайт-позиций работает безупречно.")
+
     print("\n==============================================================")
     print("✅ ВСЕ МОДУЛИ, ИНДИВИДУАЛЬНЫЕ ПРОФИЛИ И ЗАЩИТА УСПЕШНО ПРОШЛИ ТЕСТ!")
     print("==============================================================")

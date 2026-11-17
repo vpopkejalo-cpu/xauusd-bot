@@ -267,7 +267,7 @@ def _call_gemini_api(signals_summary_text: str) -> Optional[str]:
     return None
 
 
-def generate_ai_session_analysis(days: int = 1) -> str:
+def generate_ai_session_analysis(days: int = 1, target_date: Optional[str] = None) -> str:
     """
     Основная точка входа:
     Генерирует анализ с помощью доступного бесплатного AI-провайдера:
@@ -276,7 +276,7 @@ def generate_ai_session_analysis(days: int = 1) -> str:
     3. Google Gemini 1.5 Flash
     4. Автономный количественный аудитор (резерв)
     """
-    signals = get_signals_for_report(days=days, limit=60)
+    signals = get_signals_for_report(days=days, limit=60, target_date=target_date)
     rule_analysis = _build_rule_based_analysis(signals)
 
     if not AI_ANALYST_ENABLED:

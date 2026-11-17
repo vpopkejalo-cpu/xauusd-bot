@@ -309,6 +309,7 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, {
                     "paused": is_bot_paused(),
                     "today": get_today_signal_stats(),
+                    "yesterday": get_winrate_stats(target_date="yesterday"),
                     "week": get_winrate_stats(7),
                     "goal": _goal_overview(get_active_goal_plan()),
                     "goal_history": get_goal_plan_history(limit=8),
@@ -322,7 +323,7 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                 if status not in (None, "OPEN", "TP_HIT", "SL_HIT", "MANUAL_CLOSE", "SKIPPED", "EXPIRED", "MANUAL_RESET"):
                     return self._send_json(400, {"error": "Неизвестный фильтр сделок"})
                 period = payload.get("period", "all")
-                if period not in ("today", "week", "month", "all"):
+                if period not in ("today", "yesterday", "week", "month", "all"):
                     return self._send_json(400, {"error": "Неизвестный период истории"})
                 date_from = date_to_exclusive = None
                 if period != "all":
@@ -330,6 +331,9 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
                     if period == "today":
                         start_day = local_today
                         end_day = start_day + timedelta(days=1)
+                    elif period == "yesterday":
+                        start_day = local_today - timedelta(days=1)
+                        end_day = local_today
                     elif period == "week":
                         start_day = local_today - timedelta(days=local_today.weekday())
                         end_day = start_day + timedelta(days=7)
@@ -351,10 +355,15 @@ class MiniAppRequestHandler(BaseHTTPRequestHandler):
 
             if action == "winrate":
                 period = payload.get("period")
+                target_date = payload.get("target_date")
+                if period == "yesterday" or target_date == "yesterday":
+                    return self._send_json(200, {"stats": get_winrate_stats(target_date="yesterday"), "period": "yesterday"})
+                if period in (1, "1", "today") or target_date == "today":
+                    return self._send_json(200, {"stats": get_winrate_stats(target_date="today"), "period": 1})
                 period_days = None if period in (None, "all", "wr_all") else int(period)
                 if period_days is not None and period_days not in (1, 7, 30, 90, 180, 365):
                     return self._send_json(400, {"error": "Неизвестный период"})
-                return self._send_json(200, {"stats": get_winrate_stats(period_days), "period": period_days})
+                return self._send_json(200, {"stats": get_winrate_stats(period_days=period_days, target_date=target_date), "period": period_days})
 
             if action == "model_history":
                 symbol = payload.get("symbol") or None

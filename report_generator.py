@@ -45,7 +45,7 @@ def _format_local_time(iso_str: Optional[str]) -> Tuple[str, Optional[int]]:
         return str(iso_str)[:19], None
 
 
-def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, Any]:
+def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Optional[str] = None) -> Dict[str, Any]:
     """
     Генерирует исчерпывающий диагностический пакет:
     1. txt_content: Подробный диагностический отчет с таблицами весов и журналом событий.
@@ -53,12 +53,23 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100) -> Dict[str, An
     3. txt_filename, csv_filename: Имена файлов с текущей датой.
     4. summary_stats: Краткая сводка для сообщения в Telegram.
     """
+    from database import get_day_utc_bounds
     now_utc = datetime.now(timezone.utc)
     local_now = now_utc.astimezone(ZoneInfo(USER_TZ))
-    date_str = local_now.strftime("%Y-%m-%d")
+
+    if target_date is not None:
+        start_utc, end_utc, target_d, date_label = get_day_utc_bounds(target_date)
+        date_str = target_d.isoformat()
+    elif days == 1:
+        start_utc, end_utc, target_d, date_label = get_day_utc_bounds("today")
+        date_str = target_d.isoformat()
+    else:
+        date_str = local_now.strftime("%Y-%m-%d")
+        date_label = f"Последние {days} дней"
+
     gen_time_str = local_now.strftime("%Y-%m-%d %H:%M:%S")
 
-    signals = get_signals_for_report(days=days, limit=limit)
+    signals = get_signals_for_report(days=days, limit=limit, target_date=target_date)
     runtime_logs = get_runtime_logs(days=days, limit=250)
     analysis_rows = get_analysis_logs(days=days, limit=10000)
     operational_events = get_operational_events(days=days, limit=10000)

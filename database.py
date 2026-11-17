@@ -11,8 +11,9 @@ import json
 import re
 import sqlite3
 import pandas as pd
-from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, date, timedelta, timezone
+from typing import Optional, List, Dict, Any, Tuple, Union
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 import logging
 from config import DATABASE_PATH, DATABASE_URL
@@ -667,27 +668,90 @@ def consume_retrain_request() -> bool:
         return False
 
 
-def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
+USER_TIMEZONE = "Europe/Chisinau"
+
+
+def get_day_utc_bounds(target_date: Optional[Union[str, date]] = None) -> Tuple[str, str, date, str]:
     """
-    Рассчитывает статистику винрейта и точности рекомендаций за период (в днях).
-    period_days == 1: строго за СЕГОДНЯ (календарные сутки с 00:00:00 UTC).
-    period_days > 1: за последние N календарных дней.
-    period_days is None: за всё время.
+    Возвращает (start_utc_iso, end_utc_iso, target_date_obj, date_label)
+    для конкретного календарного дня в часовом поясе пользователя (Europe/Chisinau).
+    Сделки всегда строго атрибутируются по времени открытия (created_at).
     """
-    from datetime import timedelta
+    try:
+        tz = ZoneInfo(USER_TIMEZONE)
+    except Exception:
+        tz = timezone.utc
+
+    now_local = datetime.now(tz)
+
+    if target_date is None or str(target_date).lower() in ("today", "сегодня", "1", "wr_1", "wr_today"):
+        target_d = now_local.date()
+        label = f"Сегодня ({target_d.strftime('%d.%m.%Y')})"
+    elif str(target_date).lower() in ("yesterday", "вчера", "wr_yesterday"):
+        target_d = now_local.date() - timedelta(days=1)
+        label = f"Вчера ({target_d.strftime('%d.%m.%Y')})"
+    elif isinstance(target_date, str):
+        cleaned = target_date.replace("wr_date_", "").replace("wr_", "").strip()
+        try:
+            target_d = date.fromisoformat(cleaned[:10])
+            label = target_d.strftime("%d.%m.%Y")
+        except Exception:
+            target_d = now_local.date()
+            label = target_d.strftime("%d.%m.%Y")
+    elif isinstance(target_date, date):
+        target_d = target_date
+        label = target_d.strftime("%d.%m.%Y")
+    else:
+        target_d = now_local.date()
+        label = target_d.strftime("%d.%m.%Y")
+
+    start_local = datetime.combine(target_d, datetime.min.time(), tz)
+    end_local = datetime.combine(target_d + timedelta(days=1), datetime.min.time(), tz)
+
+    start_utc_iso = start_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    end_utc_iso = end_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+
+    return start_utc_iso, end_utc_iso, target_d, label
+
+
+def get_winrate_stats(
+    period_days: Optional[int] = None,
+    target_date: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Рассчитывает статистику винрейта и точности рекомендаций.
+    - target_date задан ("today", "yesterday", "YYYY-MM-DD") или period_days == 1:
+      строго за указанный календарный день в местном времени (Europe/Chisinau).
+      Сделки учитываются по дате ОТКРЫТИЯ (created_at), включая перешедшие на овернайт.
+    - period_days > 1: за последние N календарных дней.
+    - period_days is None и target_date is None: за всё время.
+    """
+    is_specific_day = bool(target_date is not None or period_days == 1)
+    end_utc_str: Optional[str] = None
+
     with get_db() as cursor:
-        if period_days == 1:
-            # Календарные сутки "Сегодня" (с 00:00:00 UTC)
-            since = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
-            sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
-            cursor.execute(sql, (since,))
+        if is_specific_day:
+            day_arg = target_date if target_date is not None else "today"
+            start_utc, end_utc, target_d, date_label = get_day_utc_bounds(day_arg)
+            end_utc_str = end_utc
+            sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? AND created_at < ? ORDER BY id ASC")
+            cursor.execute(sql, (start_utc, end_utc))
+            period_name = date_label
         elif period_days is not None and period_days > 1:
-            # За последние N календарных дней
-            since = (datetime.utcnow() - timedelta(days=period_days - 1)).strftime("%Y-%m-%d") + "T00:00:00"
+            try:
+                tz = ZoneInfo(USER_TIMEZONE)
+            except Exception:
+                tz = timezone.utc
+            now_local = datetime.now(tz)
+            since_local = datetime.combine(now_local.date() - timedelta(days=period_days - 1), datetime.min.time(), tz)
+            since_utc = since_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
             sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
-            cursor.execute(sql, (since,))
+            cursor.execute(sql, (since_utc,))
+            period_name = f"{period_days} дней"
         else:
             cursor.execute("SELECT * FROM signals ORDER BY id ASC")
+            period_name = "За всё время"
+
         rows = [dict(r) for r in cursor.fetchall()]
 
     total_signals = len(rows)
@@ -698,6 +762,15 @@ def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
     skipped = sum(1 for r in rows if r["status"] == "SKIPPED")
     open_count = sum(1 for r in rows if r["status"] == "OPEN")
 
+    # Анализ овернайт-сделок (перешедших на следующий день или еще открытых)
+    overnight_open_list = [r for r in rows if r["status"] == "OPEN"]
+    overnight_closed_list = []
+    if end_utc_str:
+        for r in rows:
+            cl = r.get("closed_at")
+            if cl and cl >= end_utc_str:
+                overnight_closed_list.append(r)
+
     finished = wins + losses
     winrate = round((wins / finished * 100), 1) if finished > 0 else 0.0
     total_pnl = sum((r["pnl"] or 0.0) for r in rows if r["status"] in ("TP_HIT", "SL_HIT"))
@@ -705,6 +778,9 @@ def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
 
     return {
         "period_days": period_days,
+        "target_date": target_date or ("today" if period_days == 1 else None),
+        "period_name": period_name,
+        "is_specific_day": is_specific_day,
         "total_signals": total_signals,
         "wins": wins,
         "losses": losses,
@@ -712,9 +788,13 @@ def get_winrate_stats(period_days: Optional[int] = None) -> Dict[str, Any]:
         "manual": manual,
         "skipped": skipped,
         "open_count": open_count,
+        "overnight_open": len(overnight_open_list),
+        "overnight_closed": len(overnight_closed_list),
+        "overnight_total": len(overnight_open_list) + len(overnight_closed_list),
         "finished": finished,
         "winrate": winrate,
         "total_pnl": round(total_pnl, 2),
+        "signals": rows,
         **actual_pnl,
     }
 
@@ -1272,24 +1352,34 @@ def get_runtime_logs(days: int = 1, limit: int = 200) -> List[Dict[str, Any]]:
     return list(reversed(rows))
 
 
-def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, Any]]:
+def get_signals_for_report(days: int = 1, limit: int = 100, target_date: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Возвращает список сигналов для формирования глубокого диагностического отчета.
-    Приоритетно возвращает сделки за сегодня (UTC), а если их нет — последние `limit` сигналов.
+    Если указан target_date ("today", "yesterday", "YYYY-MM-DD") или days == 1 —
+    возвращает сделки, открытые в этот конкретный календарный день (по часовому поясу Europe/Chisinau).
     Автоматически декодирует поле diagnostic_data из JSON.
     """
-    if days == 1:
-        start_date = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
+    if target_date is not None:
+        start_utc, end_utc, _, _ = get_day_utc_bounds(target_date)
+        sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? AND created_at < ? ORDER BY id ASC")
+        with get_db() as cursor:
+            cursor.execute(sql, (start_utc, end_utc))
+            rows = [dict(r) for r in cursor.fetchall()]
+    elif days == 1:
+        start_utc, end_utc, _, _ = get_day_utc_bounds("today")
+        sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? AND created_at < ? ORDER BY id ASC")
+        with get_db() as cursor:
+            cursor.execute(sql, (start_utc, end_utc))
+            rows = [dict(r) for r in cursor.fetchall()]
     else:
         start_date = (datetime.utcnow() - pd.Timedelta(days=days)).isoformat()
+        sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
+        with get_db() as cursor:
+            cursor.execute(sql, (start_date,))
+            rows = [dict(r) for r in cursor.fetchall()]
 
-    sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
-    with get_db() as cursor:
-        cursor.execute(sql, (start_date,))
-        rows = [dict(r) for r in cursor.fetchall()]
-
-    # Если за выбранный период сделок нет, подтягиваем последние доступные
-    if not rows:
+    # Если за выбранный период сделок нет, и target_date не задан, подтягиваем последние доступные
+    if not rows and target_date is None and days != 1:
         sql_fallback = _adapt_sql("SELECT * FROM signals ORDER BY id DESC LIMIT ?")
         with get_db() as cursor:
             cursor.execute(sql_fallback, (int(limit),))
@@ -1337,15 +1427,16 @@ def get_signals_for_report(days: int = 1, limit: int = 100) -> List[Dict[str, An
     return rows
 
 
-def get_today_signal_stats() -> Dict[str, Any]:
+def get_today_signal_stats(target_date: Optional[str] = None) -> Dict[str, Any]:
     """
-    Рассчитывает статистику сигналов за текущие календарные сутки UTC.
+    Рассчитывает статистику сигналов за календарный день (по умолчанию Сегодня в Europe/Chisinau).
     Возвращает словарь с количеством, винрейтом, серией убытков и распределением по активам.
+    Сделки строго атрибутируются по времени открытия (created_at).
     """
-    today_start = datetime.utcnow().strftime("%Y-%m-%d") + "T00:00:00"
-    sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? ORDER BY id ASC")
+    start_utc, end_utc, target_d, date_label = get_day_utc_bounds(target_date or "today")
+    sql = _adapt_sql("SELECT * FROM signals WHERE created_at >= ? AND created_at < ? ORDER BY id ASC")
     with get_db() as cursor:
-        cursor.execute(sql, (today_start,))
+        cursor.execute(sql, (start_utc, end_utc))
         rows = [dict(r) for r in cursor.fetchall()]
 
     total_today = len(rows)
@@ -1376,7 +1467,8 @@ def get_today_signal_stats() -> Dict[str, Any]:
     actual_pnl = _summarize_actual_pnl(rows)
 
     return {
-        "today_date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "today_date": target_d.isoformat(),
+        "date_label": date_label,
         "total_signals": total_today,
         "wins": wins,
         "losses": losses,
