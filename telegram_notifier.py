@@ -726,7 +726,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         news_sentiment: str = "",
         headline: str = "",
         adx: Optional[float] = None,
-        asset_category: str = ""
+        asset_category: str = "",
+        scaling_info: str = ""
     ) -> Optional[int]:
         """
         Форматирует и отправляет готовый торговый сигнал с кнопками управления:
@@ -734,8 +735,11 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         """
         display_name = SYMBOL_NAMES.get(symbol, symbol)
 
-        # Калибровка отображаемой уверенности: никогда не показывать нереалистичные 100%
-        calibrated_prob = min(max(probability, 0.55), 0.88)
+        # Калибровка отображаемой уверенности: для сверхинтуитивных входов (>=90%) показываем до 96%
+        if probability >= 0.90:
+            calibrated_prob = min(probability, 0.96)
+        else:
+            calibrated_prob = min(max(probability, 0.55), 0.88)
 
         if direction.upper() == "BUY":
             dir_emoji = "🟢"
@@ -755,12 +759,14 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
 
         adx_block = f"📊 <b>Сила тренда (ADX 14):</b> <code>{adx:.1f}</code>\n" if adx is not None else ""
         category_badge = f" ({asset_category})" if asset_category else ""
+        scaling_block = f"🧬 <b>Тактика:</b> {scaling_info}\n" if (scaling_info and ("Добор" in scaling_info or "Pyramiding" in scaling_info)) else ""
 
         message = (
             f"🔔 <b>НОВЫЙ ТОРГОВЫЙ СИГНАЛ: #{signal_id}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"🏷 <b>Инструмент:</b> <b>{display_name}</b>{category_badge}\n"
             f"{color_badge} {dir_emoji}\n\n"
+            f"{scaling_block}"
             f"🎯 <b>Направление:</b> {dir_name}\n"
             f"💵 <b>Цена входа:</b> <code>{entry_price}</code>\n"
             f"🛑 <b>Stop Loss:</b> <code>{stop_loss}</code> (защита от шума)\n"

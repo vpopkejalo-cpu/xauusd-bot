@@ -106,8 +106,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).st
 AI_ANALYST_ENABLED = os.getenv("AI_ANALYST_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # Параметры доливки в прибыль (Pyramiding):
-# Разрешено держать до N прибыльных позиций по одному активу одновременно
-MAX_PYRAMID_POSITIONS = int(os.getenv("MAX_PYRAMID_POSITIONS", "3"))
+# Разрешено держать до N позиций по одному активу одновременно при развитии тренда
+MAX_PYRAMID_POSITIONS = int(os.getenv("MAX_PYRAMID_POSITIONS", "4"))
+
+# Параметры контролируемого усреднения на откате (Pullback Averaging):
+# Разрешает не более 1 добора на откате при условии уверенности ML >= 90%
+ALLOW_HIGH_CONFIDENCE_AVERAGING = os.getenv("ALLOW_HIGH_CONFIDENCE_AVERAGING", "true").lower() in ("true", "1", "yes")
+AVERAGING_MIN_PROBABILITY = float(os.getenv("AVERAGING_MIN_PROBABILITY", "0.90"))
+MAX_AVERAGING_POSITIONS = int(os.getenv("MAX_AVERAGING_POSITIONS", "1"))
 
 # Режим работы бота: DEMO_MODE = True гарантирует непрерывную работу, анализ свечей и сбор опыта
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")

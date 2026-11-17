@@ -23,6 +23,9 @@ import pandas as pd
 from config import (
     DEMO_MODE,
     MAX_PYRAMID_POSITIONS,
+    ALLOW_HIGH_CONFIDENCE_AVERAGING,
+    AVERAGING_MIN_PROBABILITY,
+    MAX_AVERAGING_POSITIONS,
     FILTER_ASIAN_SESSION,
     ASIAN_SESSION_START_HOUR,
     ASIAN_SESSION_END_HOUR,
@@ -326,12 +329,21 @@ def check_pyramiding_allowed(
     action: str,
     current_price: float,
     atr_val: float,
-    max_positions: int = MAX_PYRAMID_POSITIONS
+    max_positions: int = MAX_PYRAMID_POSITIONS,
+    probability: float = 0.0,
+    allow_averaging: bool = ALLOW_HIGH_CONFIDENCE_AVERAGING,
+    min_averaging_prob: float = AVERAGING_MIN_PROBABILITY,
+    max_averaging_positions: int = MAX_AVERAGING_POSITIONS
 ) -> Tuple[bool, str]:
     """
-    Pyramiding Engine: Разрешает множественные сделки (доливку в тренд),
-    ТОЛЬКО если предыдущая позиция УЖЕ В ПРИБЫЛИ.
-    Категорически запрещает усреднение в убыток (Martingale).
+    Движок масштабирования позиций (Pyramiding & Controlled Pullback Averaging):
+    1. Пирамидинг (доливка в прибыль): Разрешен до max_positions, если предыдущая позиция в прибыли.
+    2. Контролируемый добор на откате (усреднение):
+       Если прошлая позиция в минусе, разрешено НЕ БОЛЕЕ ОДНОЙ (max_averaging_positions=1)
+       усредняющей сделки по активу, и ТОЛЬКО при выполнении всех условий:
+       - Уверенность ML модели >= min_averaging_prob (>= 90%)
+       - Цена находится в реальном откате (дистанция от входа >= 0.4 ATR)
+       - Цена не зашла в зону выбивания Stop Loss (< 70% пути до SL прошлой позиции)
     """
     from database import get_open_signals
     active_sigs = [s for s in get_open_signals() if s.get("symbol") == symbol]
@@ -344,31 +356,94 @@ def check_pyramiding_allowed(
     if opp_sigs:
         return False, f"Запрет: есть открытая противоположная сделка #{opp_sigs[0]['id']} ({opp_sigs[0]['direction']})"
 
-    # Проверяем лимит пирамидинга
+    # Проверяем общий лимит позиций по активу (пирамидинг + добор)
     same_dir_sigs = [s for s in active_sigs if s.get("direction") == action]
     if len(same_dir_sigs) >= max_positions:
-        return False, f"Достигнут максимальный лимит пирамидинга ({len(same_dir_sigs)}/{max_positions} позиций)"
+        return False, f"Достигнут максимальный лимит позиций ({len(same_dir_sigs)}/{max_positions})"
 
-    # Проверяем прибыль последней открытой сделки
+    # Проверяем статус последней открытой сделки того же направления
     last_sig = same_dir_sigs[-1]
     entry = float(last_sig["entry_price"])
     min_profit_dist = max(0.2 * atr_val, 0.0001)
 
     if action == "BUY":
-        if current_price >= entry + min_profit_dist:
-            profit_pts = current_price - entry
-            return True, f"🚀 Доливка в прибыль (Pyramiding #{len(same_dir_sigs)+1}): прошлая позиция #{last_sig['id']} в плюсе (+{profit_pts:.2f} п.)"
-        else:
-            return False, f"⏳ Усреднение в убыток запрещено: прошлая покупка #{last_sig['id']} по {entry:.2f} в минусе или без профита (тек: {current_price:.2f})"
-
+        in_profit = (current_price >= entry + min_profit_dist)
+        profit_pts = current_price - entry
     elif action == "SELL":
-        if current_price <= entry - min_profit_dist:
-            profit_pts = entry - current_price
-            return True, f"🚀 Доливка в прибыль (Pyramiding #{len(same_dir_sigs)+1}): прошлая позиция #{last_sig['id']} в плюсе (+{profit_pts:.2f} п.)"
-        else:
-            return False, f"⏳ Усреднение в убыток запрещено: прошлая продажа #{last_sig['id']} по {entry:.2f} в минусе или без профита (тек: {current_price:.2f})"
+        in_profit = (current_price <= entry - min_profit_dist)
+        profit_pts = entry - current_price
+    else:
+        return False, "Неизвестное направление"
 
-    return False, "Неизвестное направление"
+    # СЦЕНАРИЙ 1: Доливка в прибыль по тренду (Пирамидинг)
+    if in_profit:
+        return True, f"🚀 Доливка в прибыль (Pyramiding #{len(same_dir_sigs)+1}): прошлая позиция #{last_sig['id']} в плюсе (+{profit_pts:.2f} п.)"
+
+    # СЦЕНАРИЙ 2: Позиция в просадке / откате -> проверка условий контролируемого усреднения
+    dir_name = "покупка" if action == "BUY" else "продажа"
+    if not allow_averaging:
+        return False, f"⏳ Усреднение в убыток отключено: прошлая {dir_name} #{last_sig['id']} по {entry:.2f} в минусе или без профита (тек: {current_price:.2f})"
+
+    # Подсчитываем количество уже открытых усредняющих сделок в текущей связке.
+    # Сделка считается усредняющей, если вошла по худшей цене по отношению к своей предшественнице:
+    # BUY: entry_price < prev_entry_price
+    # SELL: entry_price > prev_entry_price
+    averaging_count = 0
+    for i in range(1, len(same_dir_sigs)):
+        prev_p = float(same_dir_sigs[i - 1]["entry_price"])
+        curr_p = float(same_dir_sigs[i]["entry_price"])
+        if action == "BUY" and curr_p < prev_p:
+            averaging_count += 1
+        elif action == "SELL" and curr_p > prev_p:
+            averaging_count += 1
+
+    if averaging_count >= max_averaging_positions:
+        return False, (
+            f"⏳ Лимит усреднений исчерпан ({averaging_count}/{max_averaging_positions}): "
+            f"по активу уже открыт 1 добор на откате (#{last_sig['id']}). Дополнительные усреднения запрещены."
+        )
+
+    # 1. Жесткий порог уверенности ML модели (по умолчанию >= 90%)
+    if probability < min_averaging_prob:
+        return False, (
+            f"⏳ Усреднение отклонено: уверенность ML {probability:.1%} ниже строгого порога {min_averaging_prob:.0%}. "
+            f"Вход в просадку разрешен только при сверхуверенности."
+        )
+
+    # 2. Проверка дистанции отката (отсечение флэтового шума на одном уровне со сделкой)
+    min_pullback_dist = max(0.4 * atr_val, 0.0001)
+    pullback_pts = abs(entry - current_price)
+    if pullback_pts < min_pullback_dist:
+        return False, (
+            f"⏳ Пауза отката: цена слишком близко к прошлому входу #{last_sig['id']} "
+            f"(смещение {pullback_pts:.2f} п. < мин. отката {min_pullback_dist:.2f} п.)"
+        )
+
+    # 3. Защита от входа перед Stop Loss (Near-SL Protection):
+    # Если цена прошла >= 70% пути от точки входа до стоп-лосса прошлой позиции — запрещаем добор.
+    sl_val = float(last_sig.get("stop_loss", 0.0))
+    if sl_val > 0:
+        if action == "BUY":
+            total_sl_dist = entry - sl_val
+            loss_dist = entry - current_price
+        else:
+            total_sl_dist = sl_val - entry
+            loss_dist = current_price - entry
+
+        if total_sl_dist > 0:
+            sl_ratio = loss_dist / total_sl_dist
+            if sl_ratio >= 0.70:
+                return False, (
+                    f"⏳ Опасная зона: цена прошла {sl_ratio:.0%} пути до Stop Loss сделки #{last_sig['id']}. "
+                    f"Усреднение перед стопом заблокировано."
+                )
+
+    # Все фильтры пройдены: санкционируем ровно 1 добор на откате с высокой вероятностью
+    return True, (
+        f"⚡ Добор на откате (Averaging #{averaging_count+1}/{max_averaging_positions}): "
+        f"уверенность ML {probability:.1%} >= {min_averaging_prob:.0%}, "
+        f"прошлая позиция #{last_sig['id']} в откате (-{pullback_pts:.2f} п.)"
+    )
 
 
 def check_symbol_consecutive_losses(symbol: str, cooldown_minutes: int = 90) -> Tuple[bool, str]:

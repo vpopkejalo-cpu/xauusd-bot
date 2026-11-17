@@ -26,6 +26,9 @@ from config import (
     NEWS_FILTER_ENABLED,
     SYMBOLS,
     MAX_PYRAMID_POSITIONS,
+    ALLOW_HIGH_CONFIDENCE_AVERAGING,
+    AVERAGING_MIN_PROBABILITY,
+    MAX_AVERAGING_POSITIONS,
     DEMO_MODE,
     KILL_SWITCH_ENABLED
 )
@@ -543,6 +546,8 @@ def run_full_system_check() -> Dict[str, Any]:
     ks_str = "🟢 Неактивен (Демо-режим: сбор опыта)" if DEMO_MODE else ("🛑 СРАБОТАЛ" if ks_active else "🟢 Защита наготове")
     lines.append(f"• <b>Аварийный Kill Switch:</b> {ks_str}")
     lines.append(f"• <b>Пирамидинг:</b> 🚀 Разрешен (до {MAX_PYRAMID_POSITIONS} прибыльных сделок в тренд)")
+    avg_str = f"⚡ Разрешен (макс 1 добор при ML ≥ {AVERAGING_MIN_PROBABILITY:.0%})" if ALLOW_HIGH_CONFIDENCE_AVERAGING else "🛑 Запрещен"
+    lines.append(f"• <b>Добор на откате:</b> {avg_str}")
     lines.append(f"• <b>Рыночная сессия:</b> {'🟢 Торги открыты' if market_open else f'🟡 Рынок закрыт ({market_reason})'}")
     
     report_text = "\n".join(lines)

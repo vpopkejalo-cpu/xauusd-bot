@@ -464,12 +464,12 @@ def main():
                             action = "HOLD"
                             outcome_label = "❌ Позитивные новости"
 
-                        # 10. ГЕНЕРАЦИЯ СИГНАЛА И ДВИЖОК ПИРАМИДИНГА (ДОЛИВКА В ПРИБЫЛЬ)
+                        # 10. ГЕНЕРАЦИЯ СИГНАЛА И ДВИЖОК ПИРАМИДИНГА / ДОБОРА НА ОТКАТЕ
                         if action in ("BUY", "SELL"):
-                            pyramid_ok, pyramid_msg = check_pyramiding_allowed(sym, action, close_p, atr_val)
+                            pyramid_ok, pyramid_msg = check_pyramiding_allowed(sym, action, close_p, atr_val, probability=prob)
                             if not pyramid_ok:
                                 logger.info(f"[{sym}] Сигнал {action} отклонен: {pyramid_msg}")
-                                outcome_label = "⏳ Усреднение запрещено"
+                                outcome_label = f"⏳ {pyramid_msg.split(':')[0]}" if ":" in pyramid_msg else "⏳ Доливка отклонена"
                                 action = "HOLD"
                             else:
                                 logger.info(f"[{sym}] {pyramid_msg}")
@@ -608,7 +608,8 @@ def main():
                                         news_sentiment=news_info["label"],
                                         headline=news_info["top_headline"],
                                         adx=adx_val,
-                                        asset_category=profile.get("category", "")
+                                        asset_category=profile.get("category", ""),
+                                        scaling_info=pyramid_msg
                                     )
                                     if sent_msg_id and sig_id:
                                         try:

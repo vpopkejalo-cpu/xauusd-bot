@@ -192,10 +192,43 @@ def test_system():
     assert "regime" in regime_res and "allow_buy" in regime_res, "detect_market_regime вернул некорректный ответ"
     print(f"Детектор режимов: {regime_res['regime']} (BUY={regime_res['allow_buy']}, SELL={regime_res['allow_sell']})")
 
-    # Проверка проверки пирамидинга
+    # Проверка проверки пирамидинга и контролируемого добора на откате
     pyr_allowed, pyr_reason = check_pyramiding_allowed("XAU/USD", "BUY", entry_price, atr_val, max_positions=3)
     assert isinstance(pyr_allowed, bool), "check_pyramiding_allowed должен вернуть boolean статус"
     print(f"Проверка пирамидинга: allowed={pyr_allowed}, reason='{pyr_reason}'")
+
+    # Юнит-тесты движка масштабирования и защиты от мартингейла
+    # 1. Первая позиция по новому активу всегда разрешена
+    ok_first, r_first = check_pyramiding_allowed("EUR/USD_TEST", "BUY", 1.0500, 0.0050)
+    assert ok_first and "Первая позиция" in r_first, f"Ошибка первой позиции: {r_first}"
+
+    # 2. Низкая уверенность при откате должна быть заблокирована (<90%)
+    # Имитируем активную позицию BUY по 2000.0, SL=1980, цена откатила до 1995.0, prob=0.85
+    from unittest.mock import patch
+    mock_active = [{"id": 101, "symbol": "MOCK", "direction": "BUY", "entry_price": 2000.0, "stop_loss": 1980.0}]
+    with patch("database.get_open_signals", return_value=mock_active):
+        # 2.1 Низкая уверенность (<90%) -> Блокировка
+        ok_low, r_low = check_pyramiding_allowed("MOCK", "BUY", 1995.0, 10.0, probability=0.85)
+        assert not ok_low and "ниже строгого порога" in r_low, f"Низкая уверенность не заблокирована: {r_low}"
+
+        # 2.2 Высокая уверенность (>=90%) и здоровый откат -> Санкционирован 1-й добор
+        ok_hi, r_hi = check_pyramiding_allowed("MOCK", "BUY", 1994.0, 10.0, probability=0.92)
+        assert ok_hi and "Добор на откате" in r_hi, f"Добор >=90% не разрешен: {r_hi}"
+
+        # 2.3 Опасная зона перед Stop Loss (цена 1983 при SL=1980 -> потеряно 85% дистанции) -> Блокировка
+        ok_sl, r_sl = check_pyramiding_allowed("MOCK", "BUY", 1983.0, 10.0, probability=0.95)
+        assert not ok_sl and "Опасная зона" in r_sl, f"Вход перед стопом не заблокирован: {r_sl}"
+
+    # 3. Лимит усреднений: если 1 добор уже совершен, второй категорически запрещен
+    mock_two_trades = [
+        {"id": 101, "symbol": "MOCK", "direction": "BUY", "entry_price": 2000.0, "stop_loss": 1980.0},
+        {"id": 102, "symbol": "MOCK", "direction": "BUY", "entry_price": 1992.0, "stop_loss": 1980.0}
+    ]
+    with patch("database.get_open_signals", return_value=mock_two_trades):
+        ok_limit, r_limit = check_pyramiding_allowed("MOCK", "BUY", 1988.0, 10.0, probability=0.95)
+        assert not ok_limit and "Лимит усреднений исчерпан" in r_limit, f"Второе усреднение не заблокировано: {r_limit}"
+
+    print("Движок пирамидинга и контролируемого добора: все 5 юнит-тестов успешно пройдены.")
 
     # Проверка заморозки после серии стопов
     is_cooling, cool_reason = check_symbol_consecutive_losses("XAU/USD", cooldown_minutes=90)
