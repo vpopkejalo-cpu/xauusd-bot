@@ -40,6 +40,12 @@ def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Di
     for row in analysis_rows:
         diagnostics = row.get("diagnostics") or {}
         candidates = diagnostics.get("shadow_candidates") or []
+        if candidates:
+            # A prediction stopped by cooldown is not a live trade. Older logs could
+            # contain current_logic candidates for those blocked attempts.
+            outcome = str(row.get("outcome") or "")
+            if not outcome.startswith("✅ Сигнал #"):
+                candidates = [item for item in candidates if item.get("name") != "current_logic"]
         if not candidates:
             continue
         symbol = row.get("symbol")

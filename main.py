@@ -337,6 +337,7 @@ def main():
                     # 2. Проверяем закрытие новой свечи
                     if latest_timestamp != last_processed_timestamps.get(sym):
                         last_processed_timestamps[sym] = latest_timestamp
+                        live_signal_created = False
                         logger.info(f"[{sym}] Анализ свечи: {latest_timestamp} | Close: {close_p:.2f} | ATR: {atr_val:.2f} | ADX: {adx_val:.1f}")
 
                         # Shadow candidates are diagnostic only: they never affect the live action.
@@ -647,6 +648,7 @@ def main():
                                         diagnostic_data=diagnostic_payload,
                                         model_snapshot_id=model_reference.get("snapshot_id")
                                     )
+                                    live_signal_created = bool(sig_id)
 
                                     logger.info(f"[{sym}] Сформирован сигнал #{sig_id}: {action} @ {levels['entry_price']}, TP: {levels['take_profit']}, SL: {levels['stop_loss']}")
                                     outcome_label = f"✅ Сигнал #{sig_id} {action}"
@@ -695,7 +697,7 @@ def main():
                             "model_reason": reason,
                             "model_diagnostics": compact_model_diagnostics,
                         })
-                        if action in ("BUY", "SELL"):
+                        if live_signal_created and action in ("BUY", "SELL"):
                             add_shadow_candidate("current_logic", action)
                         candle_diagnostics["shadow_candidates"] = shadow_candidates
                         candle_diagnostics["filtered_action"] = action
