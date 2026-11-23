@@ -20,6 +20,7 @@ from database import (
     get_latest_model_snapshots,
     get_runtime_logs,
     get_analysis_logs,
+    load_candles_from_db,
     get_operational_events,
     log_operational_event,
 )
@@ -27,6 +28,93 @@ from database import (
 logger = logging.getLogger(__name__)
 
 USER_TZ = "Europe/Chisinau"
+
+
+def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Evaluate logged hypothetical candidates against later stored bars (diagnostic only)."""
+    import pandas as pd
+
+    by_analysis_id: Dict[int, Dict[str, Any]] = {}
+    grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    candle_cache = {}
+    for row in analysis_rows:
+        diagnostics = row.get("diagnostics") or {}
+        candidates = diagnostics.get("shadow_candidates") or []
+        if not candidates:
+            continue
+        symbol = row.get("symbol")
+        if symbol not in candle_cache:
+            try:
+                bars = load_candles_from_db(symbol=symbol, limit=5000)
+                if not bars.empty:
+                    bars.index = pd.to_datetime(bars.index, utc=True)
+                candle_cache[symbol] = bars
+            except Exception:
+                logger.exception("Не удалось загрузить свечи для теневой оценки %s", symbol)
+                candle_cache[symbol] = pd.DataFrame()
+        bars = candle_cache[symbol]
+        if bars.empty:
+            continue
+        raw_ts = diagnostics.get("candle_timestamp")
+        try:
+            signal_ts = pd.Timestamp(raw_ts)
+            signal_ts = signal_ts.tz_localize("UTC") if signal_ts.tzinfo is None else signal_ts.tz_convert("UTC")
+        except Exception:
+            continue
+        future = bars.loc[bars.index > signal_ts].head(15)
+        if len(future) < 15:
+            continue  # Still unresolved: never score a partially observed horizon.
+
+        regime_info = diagnostics.get("market_regime") or {}
+        regime = regime_info.get("regime", "UNKNOWN") if isinstance(regime_info, dict) else str(regime_info)
+        dimensions = {
+            "weekday": str(diagnostics.get("weekday_local", "UNKNOWN")),
+            "session": str(diagnostics.get("session_name", "UNKNOWN")),
+            "regime": str(regime),
+        }
+        evaluated = {}
+        for candidate in candidates:
+            name, direction = candidate.get("name"), candidate.get("action")
+            try:
+                entry, tp, sl = float(candidate["entry"]), float(candidate["tp"]), float(candidate["sl"])
+                risk = abs(entry - sl)
+                if risk <= 0 or direction not in ("BUY", "SELL"):
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            result = None
+            for _, bar in future.iterrows():
+                high, low = float(bar["high"]), float(bar["low"])
+                tp_hit = high >= tp if direction == "BUY" else low <= tp
+                sl_hit = low <= sl if direction == "BUY" else high >= sl
+                if sl_hit:  # Conservative tie-break if both barriers fall inside one OHLC bar.
+                    result = {"outcome": "SL", "r_multiple": -1.0}
+                    break
+                if tp_hit:
+                    result = {"outcome": "TP", "r_multiple": abs(tp - entry) / risk}
+                    break
+            if result is None:
+                final_close = float(future.iloc[-1]["close"])
+                signed_move = final_close - entry if direction == "BUY" else entry - final_close
+                r_value = signed_move / risk
+                result = {"outcome": "TIMEOUT", "r_multiple": r_value}
+            result.update({"name": name, "action": direction})
+            evaluated[name] = result
+            for dimension, value in dimensions.items():
+                grouped.setdefault((name, dimension, value), []).append(result)
+        if evaluated and row.get("id") is not None:
+            by_analysis_id[int(row["id"])] = evaluated
+
+    summaries = []
+    for (name, dimension, value), values in sorted(grouped.items()):
+        returns = [item["r_multiple"] for item in values]
+        summaries.append({
+            "candidate": name, "dimension": dimension, "value": value,
+            "count": len(values), "wins": sum(x > 0 for x in returns),
+            "winrate": 100.0 * sum(x > 0 for x in returns) / len(values),
+            "total_r": sum(returns), "mean_r": sum(returns) / len(values),
+        })
+    return by_analysis_id, summaries
 
 
 def _format_local_time(iso_str: Optional[str]) -> Tuple[str, Optional[int]]:
@@ -73,6 +161,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
     runtime_logs = get_runtime_logs(days=days, limit=250)
     analysis_rows = get_analysis_logs(days=days, limit=10000)
     operational_events = get_operational_events(days=days, limit=10000)
+    shadow_results_by_id, shadow_summaries = _evaluate_shadow_candidates(analysis_rows)
 
     # Статистика сессии
     total_count = len(signals)
@@ -163,6 +252,30 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
     lines.append(f"• Прибыльность по P/L:    {actual_winrate}%" if actual_winrate is not None else "• Прибыльность по P/L:    пока недостаточно фактических записей")
     lines.append(f"• Изменение цены по инструментам: {format_price_moves(signals)}")
     lines.append("  Это оценка движения цены, не прибыль в валюте счёта.")
+    lines.append("")
+    lines.append("1а. ТЕНЕВОЕ СРАВНЕНИЕ ВАРИАНТОВ (не меняет реальные сигналы):")
+    lines.append("-" * 80)
+    lines.append("Оценка по следующим 15 сохранённым свечам. SL считается первым, если TP и SL задеты в одной свече.")
+    lines.append("Результат в R (долях исходного риска): без спреда, комиссий, проскальзывания и размера позиции.")
+    lines.append("Это отдельная оценка каждого решения; гипотетические сделки могут перекрываться и не моделируют баланс/маржу.")
+    if not shadow_summaries:
+        lines.append("Пока нет полностью завершённых теневых наблюдений; новые появятся после накопления следующих 15 свечей.")
+    else:
+        for candidate_name in sorted({item["candidate"] for item in shadow_summaries}):
+            lines.append(f"Вариант: {candidate_name}")
+            selected = [item for item in shadow_summaries if item["candidate"] == candidate_name]
+            overall = [item for item in selected if item["dimension"] == "weekday"]
+            # Weekday entries are the same observations partitioned by day; use summed stats for overall.
+            total_n = sum(item["count"] for item in overall)
+            total_r = sum(item["total_r"] for item in overall)
+            wins_n = sum(item["wins"] for item in overall)
+            lines.append(f"  Итого: {total_n} наблюдений | winrate {wins_n / total_n * 100:.1f}% | сумма {total_r:+.2f}R | среднее {total_r / total_n:+.3f}R" if total_n else "  Итого: нет данных")
+            for dimension in ("weekday", "session", "regime"):
+                lines.append(f"  По {dimension}:")
+                for item in selected:
+                    if item["dimension"] == dimension:
+                        lines.append(f"    {item['value']}: n={item['count']}, winrate={item['winrate']:.1f}%, сумма={item['total_r']:+.2f}R, среднее={item['mean_r']:+.3f}R")
+    lines.append("Наблюдения по дням/сессиям/режимам — исследовательская статистика, не доказательство преимущества стратегии.")
     lines.append("")
 
     # Preserve the exact model version used for each signal and print inspectable parameters.
@@ -504,7 +617,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
         "analysis_id", "created_at_utc", "symbol", "close_price", "ml_action",
         "ml_probability", "final_outcome", "reason", "model_snapshot_id",
         "model_snapshot_sha256", "candle_timestamp", "ohlcv_json", "features_json",
-        "market_regime_json", "news_json", "model_diagnostics_json", "full_diagnostics_json",
+        "market_regime_json", "news_json", "model_diagnostics_json", "shadow_outcomes_json", "full_diagnostics_json",
     ])
     for item in analysis_rows:
         diagnostics = item.get("diagnostics") or {}
@@ -519,6 +632,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
             json.dumps(diagnostics.get("market_regime", {}), ensure_ascii=False, default=str),
             json.dumps(diagnostics.get("news", {}), ensure_ascii=False, default=str),
             json.dumps(diagnostics.get("model_diagnostics", {}), ensure_ascii=False, default=str),
+            json.dumps(shadow_results_by_id.get(int(item["id"]), {}) if item.get("id") is not None else {}, ensure_ascii=False, default=str),
             json.dumps(diagnostics, ensure_ascii=False, default=str),
         ])
     analysis_csv_content = analysis_buffer.getvalue()

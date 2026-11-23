@@ -197,8 +197,9 @@ def main():
     except Exception as e:
         logger.error(f"Не удалось отправить приветственное сообщение в Telegram: {e}")
 
-    # 6. Первоначальная загрузка истории и индивидуальное обучение моделей по каждому активу
-    logger.info(f"Начальная загрузка истории и обучение индивидуальных моделей (до {TRAINING_CANDLES_COUNT} свечей на актив)...")
+    # 6. Загружаем историю для каждого актива. Существующий снимок модели,
+    # восстановленный из БД, не перезаписываем при каждом запуске/деплое.
+    logger.info(f"Начальная загрузка истории (до {TRAINING_CANDLES_COUNT} свечей на актив)...")
     trained_assets = []
     for sym in SYMBOLS:
         try:
@@ -207,10 +208,18 @@ def main():
             if not candles_df.empty:
                 save_candles(candles_df, symbol=sym)
                 candles_with_ind = calculate_indicators(candles_df, atr_period=ATR_PERIOD)
-                # Обучаем индивидуальную модель под этот актив
-                success = ml_model.train(candles_with_ind, symbol=sym)
-                if success:
-                    trained_assets.append(sym)
+                # Новую модель обучаем только если для актива ещё нет сохранённой.
+                # Плановое обновление выполняется отдельно по RETRAIN_INTERVAL_HOURS.
+                if sym in ml_model.models:
+                    model_ref = ml_model.get_model_snapshot_reference(sym)
+                    logger.info(
+                        "[%s] Используется сохранённая модель snapshot=%s; стартовое переобучение пропущено",
+                        sym, model_ref.get("snapshot_id"),
+                    )
+                else:
+                    success = ml_model.train(candles_with_ind, symbol=sym)
+                    if success:
+                        trained_assets.append(sym)
             time.sleep(1)  # Защитная пауза для уважения rate limits Twelve Data
         except Exception as e:
             logger.error(f"[{sym}] Ошибка начальной загрузки/обучения: {e}")
@@ -330,6 +339,60 @@ def main():
                         last_processed_timestamps[sym] = latest_timestamp
                         logger.info(f"[{sym}] Анализ свечи: {latest_timestamp} | Close: {close_p:.2f} | ATR: {atr_val:.2f} | ADX: {adx_val:.1f}")
 
+                        # Shadow candidates are diagnostic only: they never affect the live action.
+                        # Predict before early filters so blocked decisions are still measurable.
+                        regime_info = detect_market_regime(latest_candle)
+                        prediction = ml_model.predict(sym, latest_candle)
+                        raw_action = prediction.get("action", "HOLD")
+                        session_name = get_current_trading_session_name(now_utc)
+                        try:
+                            from zoneinfo import ZoneInfo
+                            local_dt = now_utc.astimezone(ZoneInfo("Europe/Chisinau"))
+                        except Exception:
+                            local_dt = now_utc
+                        shadow_candidates = []
+
+                        def add_shadow_candidate(name, candidate_action):
+                            if candidate_action not in ("BUY", "SELL"):
+                                return
+                            shadow_levels = calculate_risk_levels(candidate_action, close_p, atr_val, symbol=sym)
+                            shadow_candidates.append({
+                                "name": name,
+                                "action": candidate_action,
+                                "entry": float(shadow_levels["entry_price"]),
+                                "tp": float(shadow_levels["take_profit"]),
+                                "sl": float(shadow_levels["stop_loss"]),
+                                "horizon_bars": 15,
+                            })
+
+                        add_shadow_candidate("ml_raw", raw_action)
+                        regime_action = raw_action
+                        if (regime_action == "BUY" and not regime_info.get("allow_buy", True)) or (
+                            regime_action == "SELL" and not regime_info.get("allow_sell", True)
+                        ):
+                            regime_action = "HOLD"
+                        add_shadow_candidate("ml_regime_only", regime_action)
+                        regime_name = str(regime_info.get("regime", "RANGE_FLAT"))
+                        trend_action = "BUY" if regime_name == "BULL_TREND" else "SELL" if regime_name == "BEAR_TREND" else "HOLD"
+                        add_shadow_candidate("regime_trend", trend_action)
+                        candle_diagnostics.update({
+                            "weekday_local": local_dt.strftime("%A"),
+                            "weekday_local_number": local_dt.weekday(),
+                            "hour_local": local_dt.hour,
+                            "session_name": session_name,
+                            "market_regime": regime_info,
+                            "shadow_candidates": shadow_candidates,
+                            "shadow_evaluation_note": "Гипотетические варианты; не влияют на действующие сигналы.",
+                        })
+                        pred_diag = prediction.get("diagnostics", {}) or {}
+                        candle_diagnostics["model_diagnostics"] = {
+                            key: pred_diag.get(key) for key in (
+                                "model_accuracy", "model_reliable", "samples_count", "buy_probability",
+                                "sell_probability", "min_probability", "intercept", "primary_driver",
+                            ) if key in pred_diag
+                        }
+                        candle_diagnostics["model_action"] = raw_action
+
                         # 3. ИНДИВИДУАЛЬНЫЙ ФИЛЬТР СЕССИИ И БОКОВИКА (ADX)
                         allowed, block_reason = check_asset_trading_allowed(sym, candle=latest_candle, check_time=now_utc)
                         if not allowed:
@@ -345,9 +408,6 @@ def main():
                             log_candle_analysis(sym, close_p, "HOLD", 0.0, "⏸ Тайм-аут актива", loss_reason,
                                                 model_snapshot_id, candle_diagnostics)
                             continue
-
-                        # 3.2. MARKET REGIME ENGINE: Определение режима рынка (Тренд vs Флэт)
-                        regime_info = detect_market_regime(latest_candle)
 
                         # 4. ДНЕВНОЙ ЛИМИТ СИГНАЛОВ ПО ЭТОМУ АКТИВУ (в боевом режиме)
                         sym_signals_today = get_today_symbol_signal_count(sym)
@@ -375,8 +435,7 @@ def main():
                                                 {**candle_diagnostics, "news": news_info})
                             continue
 
-                        # 7. ИНДИВИДУАЛЬНЫЙ ML ПРОГНОЗ
-                        prediction = ml_model.predict(sym, latest_candle)
+                        # 7. ИНДИВИДУАЛЬНЫЙ ML ПРОГНОЗ уже рассчитан для теневого журнала выше.
                         action = prediction["action"]
                         prob = prediction["probability"]
                         reason = prediction["reason"]
@@ -636,6 +695,10 @@ def main():
                             "model_reason": reason,
                             "model_diagnostics": compact_model_diagnostics,
                         })
+                        if action in ("BUY", "SELL"):
+                            add_shadow_candidate("current_logic", action)
+                        candle_diagnostics["shadow_candidates"] = shadow_candidates
+                        candle_diagnostics["filtered_action"] = action
                         log_candle_analysis(sym, close_p, action, prob, outcome_label, reason,
                                             model_snapshot_id, candle_diagnostics)
 
@@ -650,7 +713,7 @@ def main():
                         "error_type": type(e).__name__, "error": str(e)[:4000],
                     })
 
-            # 3. ПЕРИОДИЧЕСКОЕ САМООБУЧЕНИЕ МОДЕЛЕЙ (Каждые 4 часа или по запросу пользователя)
+            # 3. Плановое обновление candle-моделей или ручной запрос пользователя.
             elapsed_hours = (time.time() - last_retrain_time) / 3600.0
             manual_request = consume_retrain_request()
             if manual_request or elapsed_hours >= RETRAIN_INTERVAL_HOURS:

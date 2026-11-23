@@ -18,7 +18,7 @@ services:
       - key: TRAINING_CANDLES_COUNT
         value: "800"
       - key: RETRAIN_INTERVAL_HOURS
-        value: "4"
+        value: "168"
       - key: SL_ATR_MULTIPLIER
         value: "1.8"
       - key: TP_ATR_MULTIPLIER
