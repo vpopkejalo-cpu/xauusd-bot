@@ -831,12 +831,6 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         """
         display_name = SYMBOL_NAMES.get(symbol, symbol)
 
-        # Калибровка отображаемой уверенности: для сверхинтуитивных входов (>=90%) показываем до 96%
-        if probability >= 0.90:
-            calibrated_prob = min(probability, 0.96)
-        else:
-            calibrated_prob = min(max(probability, 0.55), 0.88)
-
         if direction.upper() == "BUY":
             dir_emoji = "🟢"
             dir_name = "ПОКУПКА (BUY)"
@@ -869,7 +863,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             f"🏆 <b>Take Profit:</b> <code>{take_profit}</code>\n"
             f"⚖️ <b>Соотношение R:R:</b> <code>{risk_reward}</code>\n\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 <b>Уверенность модели:</b> <b>{calibrated_prob:.1%}</b>\n"
+            f"🤖 <b>Оценка направления BUY/SELL:</b> <b>{probability:.1%}</b>\n"
+            f"<i>Это оценка выбора направления, не вероятность прибыльной сделки.</i>\n"
             f"{adx_block}"
             f"{news_block}"
             f"🌊 <b>Волатильность (ATR 14):</b> <code>${atr}</code>\n"
@@ -953,14 +948,22 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
         )
         return bool(self.send_raw_message(message))
 
-    def send_retrain_notification(self, samples_count: int, accuracy: float):
-        """Отправляет уведомление об успешном сеансе самообучения модели."""
-        message = (
-            "🧠 <b>САМООБУЧЕНИЕ МОДЕЛИ ЗАВЕРШЕНО</b>\n\n"
-            f"📊 <b>Обработано свечей:</b> {samples_count}\n"
-            f"🎯 <b>Новая точность кросс-валидации:</b> {accuracy:.1%}\n"
-            "💾 Веса модели успешно обновлены на сервере."
-        )
+    def send_retrain_notification(self, samples_count: int, accuracy: float, activated: bool = True):
+        """Report whether new weights were activated or saved only as candidates."""
+        if activated:
+            message = (
+                "🧠 <b>ОБУЧЕНИЕ МОДЕЛИ ЗАВЕРШЕНО</b>\n\n"
+                f"📊 <b>Обработано свечей:</b> {samples_count}\n"
+                f"🎯 <b>CV точность направления:</b> {accuracy:.1%}\n"
+                "💾 Новые веса активированы. Это оценка направления BUY/SELL, не винрейт сделок."
+            )
+        else:
+            message = (
+                "🧪 <b>СОХРАНЕНЫ КАНДИДАТЫ МОДЕЛЕЙ</b>\n\n"
+                f"📦 <b>Инструментов:</b> {samples_count}\n"
+                "🔒 Действующие веса не изменены. Кандидаты доступны во вкладке «Модели» для сравнения.\n"
+                "ℹ️ CV оценивает направление BUY/SELL, а не прибыльность сделок."
+            )
         return bool(self.send_raw_message(message))
 
     def _poll_updates(self):
@@ -1180,7 +1183,6 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
             dir_emoji = "🟢" if direction.upper() == "BUY" else "🔴"
             dir_name = "ПОКУПКА (BUY)" if direction.upper() == "BUY" else "ПРОДАЖА (SELL)"
             prob = sig.get("probability", 0.6)
-            calibrated_prob = min(max(prob, 0.55), 0.88)
             created_dt = sig.get("created_at", "")[:19].replace("T", " ")
 
             status = sig.get("status", "OPEN")
@@ -1232,7 +1234,8 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                 f"🛑 <b>Stop Loss:</b> <code>{sig.get('stop_loss')}</code>\n"
                 f"{levels_history_text}"
                 f"🌊 <b>Волатильность (ATR):</b> <code>${sig.get('atr')}</code>\n"
-                f"🤖 <b>Уверенность:</b> <b>{calibrated_prob:.1%}</b>\n"
+                f"🤖 <b>Оценка направления BUY/SELL:</b> <b>{prob:.1%}</b>\n"
+                f"<i>Это оценка выбора направления, не вероятность прибыльной сделки.</i>\n"
                 f"⏱ <b>Время открытия:</b> <code>{created_dt} UTC</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"{footer}"
@@ -1469,7 +1472,7 @@ W.onEvent('chatDataChanged',()=>{try{s=JSON.parse(W.chatData||'{}');render()}cat
                     act = a["action"]
                     prob = round(a["probability"] * 100, 1)
                     outcome = a["outcome"]
-                    a_lines.append(f"• <b>{dt} [{sym}]</b>: ML {act} ({prob}%) | {outcome}")
+                    a_lines.append(f"• <b>{dt} [{sym}]</b>: ML {act} (оценка направления {prob}%) | {outcome}")
                 analyses_block = "\n".join(a_lines)
 
             reply = (

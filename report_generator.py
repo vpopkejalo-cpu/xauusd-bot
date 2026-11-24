@@ -30,12 +30,14 @@ logger = logging.getLogger(__name__)
 USER_TZ = "Europe/Chisinau"
 
 
-def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
-    """Evaluate logged hypothetical candidates against later stored bars (diagnostic only)."""
+def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+    """Evaluate non-overlapping hypothetical positions against later stored bars."""
     import pandas as pd
 
     by_analysis_id: Dict[int, Dict[str, Any]] = {}
     grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    occupied_until: Dict[Tuple[str, str], Any] = {}
+    skipped_overlaps: Dict[str, int] = {}
     candle_cache = {}
     for row in analysis_rows:
         diagnostics = row.get("diagnostics") or {}
@@ -81,6 +83,12 @@ def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Di
         evaluated = {}
         for candidate in candidates:
             name, direction = candidate.get("name"), candidate.get("action")
+            candidate_key = (str(name), str(symbol))
+            prior_exit = occupied_until.get(candidate_key)
+            if prior_exit is not None and signal_ts <= prior_exit:
+                skipped_overlaps[str(name)] = skipped_overlaps.get(str(name), 0) + 1
+                evaluated[str(name)] = {"outcome": "SKIPPED_OVERLAP", "r_multiple": None}
+                continue
             try:
                 entry, tp, sl = float(candidate["entry"]), float(candidate["tp"]), float(candidate["sl"])
                 risk = abs(entry - sl)
@@ -89,23 +97,27 @@ def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Di
             except (KeyError, TypeError, ValueError):
                 continue
             result = None
-            for _, bar in future.iterrows():
+            exit_timestamp = future.index[-1]
+            for bar_timestamp, bar in future.iterrows():
                 high, low = float(bar["high"]), float(bar["low"])
                 tp_hit = high >= tp if direction == "BUY" else low <= tp
                 sl_hit = low <= sl if direction == "BUY" else high >= sl
                 if sl_hit:  # Conservative tie-break if both barriers fall inside one OHLC bar.
                     result = {"outcome": "SL", "r_multiple": -1.0}
+                    exit_timestamp = bar_timestamp
                     break
                 if tp_hit:
                     result = {"outcome": "TP", "r_multiple": abs(tp - entry) / risk}
+                    exit_timestamp = bar_timestamp
                     break
             if result is None:
                 final_close = float(future.iloc[-1]["close"])
                 signed_move = final_close - entry if direction == "BUY" else entry - final_close
                 r_value = signed_move / risk
                 result = {"outcome": "TIMEOUT", "r_multiple": r_value}
-            result.update({"name": name, "action": direction})
-            evaluated[name] = result
+            occupied_until[candidate_key] = exit_timestamp
+            result.update({"name": name, "action": direction, "exit_timestamp": str(exit_timestamp)})
+            evaluated[str(name)] = result
             for dimension, value in dimensions.items():
                 grouped.setdefault((name, dimension, value), []).append(result)
         if evaluated and row.get("id") is not None:
@@ -120,7 +132,7 @@ def _evaluate_shadow_candidates(analysis_rows: List[Dict[str, Any]]) -> Tuple[Di
             "winrate": 100.0 * sum(x > 0 for x in returns) / len(values),
             "total_r": sum(returns), "mean_r": sum(returns) / len(values),
         })
-    return by_analysis_id, summaries
+    return by_analysis_id, summaries, skipped_overlaps
 
 
 def _format_local_time(iso_str: Optional[str]) -> Tuple[str, Optional[int]]:
@@ -167,7 +179,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
     runtime_logs = get_runtime_logs(days=days, limit=250)
     analysis_rows = get_analysis_logs(days=days, limit=10000)
     operational_events = get_operational_events(days=days, limit=10000)
-    shadow_results_by_id, shadow_summaries = _evaluate_shadow_candidates(analysis_rows)
+    shadow_results_by_id, shadow_summaries, shadow_skipped_overlaps = _evaluate_shadow_candidates(analysis_rows)
 
     # Статистика сессии
     total_count = len(signals)
@@ -261,14 +273,15 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
     lines.append("")
     lines.append("1а. ТЕНЕВОЕ СРАВНЕНИЕ ВАРИАНТОВ (не меняет реальные сигналы):")
     lines.append("-" * 80)
-    lines.append("Оценка по следующим 15 сохранённым свечам. SL считается первым, если TP и SL задеты в одной свече.")
-    lines.append("Результат в R (долях исходного риска): без спреда, комиссий, проскальзывания и размера позиции.")
-    lines.append("Это отдельная оценка каждого решения; гипотетические сделки могут перекрываться и не моделируют баланс/маржу.")
+    lines.append("Оценка по следующим 15 сохранённым свечам; одновременные гипотетические позиции одного варианта и инструмента исключаются.")
+    lines.append("SL считается первым, если TP и SL задеты в одной свече. Результат в R: без спреда, комиссий, проскальзывания и размера позиции.")
+    lines.append("Это последовательная оценка кандидатов, а не воспроизведение брокерского исполнения или фактической доходности.")
     if not shadow_summaries:
         lines.append("Пока нет полностью завершённых теневых наблюдений; новые появятся после накопления следующих 15 свечей.")
     else:
         for candidate_name in sorted({item["candidate"] for item in shadow_summaries}):
             lines.append(f"Вариант: {candidate_name}")
+            lines.append(f"  Исключено из-за уже открытой гипотетической позиции: {shadow_skipped_overlaps.get(candidate_name, 0)}")
             selected = [item for item in shadow_summaries if item["candidate"] == candidate_name]
             overall = [item for item in selected if item["dimension"] == "weekday"]
             # Weekday entries are the same observations partitioned by day; use summed stats for overall.
@@ -310,15 +323,19 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
         lines.append("")
         lines.append(
             f"Модель #{snapshot_id} | {snapshot.get('symbol')} | обучение: {snapshot.get('trained_at') or 'время неизвестно'} | "
-            f"CV accuracy: {float(snapshot.get('accuracy') or 0):.1%} | samples: {snapshot.get('samples_count')}"
+            f"статус: {'активная' if snapshot.get('is_active', True) else 'кандидат'} | "
+            f"CV направление BUY/SELL: {float(snapshot.get('accuracy') or 0):.1%} | samples: {snapshot.get('samples_count')}"
         )
         lines.append(f"   SHA-256 артефакта: {snapshot.get('artifact_sha256') or '—'}")
         cv = metadata.get("cross_validation") or {}
         if cv:
             lines.append(
-                f"   TimeSeriesSplit: folds={cv.get('folds')} | fold accuracy={cv.get('fold_accuracies', [])} | "
+                f"   {cv.get('method', 'TimeSeriesSplit')}: проверено фолдов={cv.get('evaluated_folds', cv.get('folds'))} | "
+                f"balanced accuracy={cv.get('mean_balanced_accuracy', '—')} | "
+                f"Brier={cv.get('mean_brier_score_buy_probability', '—')} | "
                 f"обучающая выборка={metadata.get('training_start')} .. {metadata.get('training_end')}"
             )
+            lines.append("   Это проверка направления по свечной разметке, не вероятность выигрыша сделки и не доходность.")
         if features and coefficient_row:
             ranked = sorted(zip(features, coefficient_row), key=lambda pair: abs(float(pair[1])), reverse=True)
             lines.append("   Коэффициенты LogisticRegression (стандартизированные; знак + смещает к BUY, − к SELL):")
@@ -445,7 +462,7 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
                 lines.append(f"   • История [{event.get('created_at', '')} UTC] {event.get('event_type')} / {event.get('source')}: {json.dumps(event_data, ensure_ascii=False, default=str)}")
             for change in s.get("level_history", []):
                 lines.append(f"   • Уровни [{change.get('changed_at', '')} UTC]: Entry {change.get('old_actual_entry_price')} → {change.get('new_actual_entry_price')}; TP {change.get('old_take_profit')} → {change.get('new_take_profit')}; SL {change.get('old_stop_loss')} → {change.get('new_stop_loss')}")
-            lines.append(f"   • Волатильность (ATR): {atr_v:.4f} | Вероятность ML: {prob_v:.1%}")
+            lines.append(f"   • Волатильность (ATR): {atr_v:.4f} | Оценка направления ML: {prob_v:.1%}")
             snapshot = s.get("model_snapshot") or {}
             snapshot_ref = diag.get("model_snapshot") or {}
             snapshot_id = s.get("model_snapshot_id") or snapshot_ref.get("snapshot_id")
@@ -487,9 +504,10 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
 
             if feat_list:
                 lines.append(f"🧠 ДЕТАЛИЗАЦИЯ ВЕСОВ И ВКЛАДА ПРИЗНАКОВ В РЕШЕНИЕ:")
-                lines.append(f"   • CV Точность модели: {ml_pred.get('model_accuracy', 0.0):.1%} | Обучено на {ml_pred.get('samples_count', 0)} свечах")
+                lines.append(f"   • CV точность направления BUY/SELL: {ml_pred.get('model_accuracy', 0.0):.1%} | Обучено на {ml_pred.get('samples_count', 0)} свечах")
                 lines.append(f"   • Свободный член (Intercept): {ml_pred.get('intercept', 0.0):+.4f}")
                 lines.append(f"   • P(BUY): {ml_pred.get('buy_probability', 0.0):.1%} | P(SELL): {ml_pred.get('sell_probability', 0.0):.1%} | Порог: {ml_pred.get('min_probability', 0.0):.1%}")
+                lines.append("   • Эти значения описывают выбор направления моделью, а не шанс прибыльного исхода сделки.")
                 lines.append("")
                 lines.append("   ┌──────────────────┬──────────┬──────────┬──────────┬──────────┬────────────────────────┐")
                 lines.append("   │ Признак          │ Значение │ Scaled   │ Вес (W)  │ Вклад(W*S│ Влияние на решение     │")
@@ -557,7 +575,8 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
         "position_quantity", "reported_pnl", "reported_pnl_currency", "level_history_json", "events_json",
         "atr", "adx", "rsi", "macd_hist", "ml_probability", "min_probability",
         "model_snapshot_id", "model_snapshot_sha256", "model_weights_json",
-        "primary_driver", "news_score", "news_label"
+        "primary_driver", "news_score", "news_label", "news_source", "news_fetched_at_utc",
+        "news_cache_hit", "news_cache_age_seconds", "news_article_count", "news_articles_json"
     ]
     csv_writer.writerow(headers)
 
@@ -612,7 +631,13 @@ def generate_diagnostics_report(days: int = 1, limit: int = 100, target_date: Op
             json.dumps(model_snapshot.get("weights", {}), ensure_ascii=False, default=str),
             ml_pred.get("primary_driver", ""),
             news_info.get("score", ""),
-            news_info.get("label", "")
+            news_info.get("label", ""),
+            news_info.get("source", ""),
+            news_info.get("fetched_at_utc", ""),
+            news_info.get("cache_hit", ""),
+            news_info.get("cache_age_seconds", ""),
+            news_info.get("article_count", ""),
+            json.dumps(news_info.get("articles", []), ensure_ascii=False, default=str)
         ])
 
     csv_content = csv_buffer.getvalue()

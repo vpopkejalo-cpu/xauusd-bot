@@ -26,7 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, brier_score_loss
 
 from config import MODEL_PATH, MODELS_DIR, MIN_PROBABILITY
 from risk_manager import get_asset_profile
@@ -206,9 +206,10 @@ class TradingMLModel:
 
     def save_symbol_model(self, symbol: str, pipeline: Pipeline, accuracy: float, samples_count: int,
                           training_metadata: Optional[Dict[str, Any]] = None,
-                          trained_at: Optional[str] = None) -> int:
-        """Write model bytes and inspectable parameters to DB before treating it as saved."""
+                          trained_at: Optional[str] = None, activate: bool = True) -> int:
+        """Save a reproducible model; candidates never replace the active weights."""
         metadata = dict(training_metadata or {})
+        metadata["snapshot_status"] = "active" if activate else "candidate"
         data = {"symbol": symbol, "pipeline": pipeline, "accuracy": float(accuracy),
                 "samples_count": int(samples_count), "features": FEATURE_COLUMNS,
                 "trained_at": trained_at, "metadata": metadata}
@@ -218,8 +219,12 @@ class TradingMLModel:
         artifact_hash = hashlib.sha256(artifact).hexdigest()
         snapshot_id = save_model_snapshot(
             symbol, trained_at, accuracy, samples_count, FEATURE_COLUMNS,
-            self._weight_snapshot(pipeline), metadata, artifact_hash, artifact,
+            self._weight_snapshot(pipeline), metadata, artifact_hash, artifact, is_active=activate,
         )
+
+        if not activate:
+            logger.info("Кандидат модели %s сохранён (#%s); активные веса не изменены", symbol, snapshot_id)
+            return snapshot_id
 
         data.update({"snapshot_id": snapshot_id, "artifact_sha256": artifact_hash})
         try:
@@ -350,16 +355,20 @@ class TradingMLModel:
             return pd.DataFrame(), pd.Series(dtype=int)
 
         clean_data = data.iloc[valid_indices].copy()
+        # Keep the original candle positions so validation can purge training
+        # labels whose 15-bar outcome window reaches into the test period.
+        clean_data["_source_position"] = valid_indices
         clean_data["target"] = labels
 
         valid_mask = ~clean_data[FEATURE_COLUMNS].isna().any(axis=1)
         final_data = clean_data[valid_mask]
 
         X = final_data[FEATURE_COLUMNS]
+        X.attrs["source_positions"] = final_data["_source_position"].to_numpy(dtype=int)
         y = final_data["target"]
         return X, y
 
-    def train(self, df: pd.DataFrame, symbol: str = "XAU/USD") -> bool:
+    def train(self, df: pd.DataFrame, symbol: str = "XAU/USD", activate: bool = True) -> bool:
         """
         Обучает модель для конкретного актива с использованием временной кросс-валидации.
         """
@@ -391,20 +400,69 @@ class TradingMLModel:
                 ))
             ])
 
-            # Оценка на временной кросс-валидации (TimeSeriesSplit)
+            # Evaluate chronologically. Purge each fold by source candle position:
+            # a training label uses the next `horizon` bars and must not inspect
+            # any bar from the validation interval.
             n_splits = min(5, max(2, len(X) // 20))
             tscv = TimeSeriesSplit(n_splits=n_splits)
             accuracies = []
-            for train_idx, test_idx in tscv.split(X):
+            balanced_accuracies = []
+            brier_scores = []
+            fold_metrics = []
+            source_positions = np.asarray(X.attrs.get("source_positions", []), dtype=int)
+            if len(source_positions) != len(X):
+                raise ValueError("Не удалось восстановить позиции свечей для очистки временных фолдов")
+
+            for fold_number, (train_idx, test_idx) in enumerate(tscv.split(X), start=1):
+                first_test_position = int(source_positions[test_idx[0]])
+                train_idx = np.asarray([
+                    idx for idx in train_idx
+                    if int(source_positions[idx]) + 15 < first_test_position
+                ], dtype=int)
+                if not len(train_idx):
+                    continue
                 X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
                 y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
 
                 if len(np.unique(y_tr)) > 1:
                     pipeline.fit(X_tr, y_tr)
                     preds = pipeline.predict(X_te)
-                    accuracies.append(accuracy_score(y_te, preds))
+                    accuracy = float(accuracy_score(y_te, preds))
+                    balanced_accuracy = float(balanced_accuracy_score(y_te, preds))
+                    classes = list(pipeline.named_steps["classifier"].classes_)
+                    buy_class_index = classes.index(CLASS_BUY)
+                    buy_probabilities = pipeline.predict_proba(X_te)[:, buy_class_index]
+                    brier = float(brier_score_loss(y_te, buy_probabilities, pos_label=CLASS_BUY))
+                    accuracies.append(accuracy)
+                    balanced_accuracies.append(balanced_accuracy)
+                    brier_scores.append(brier)
+                    fold_metrics.append({
+                        "fold": fold_number,
+                        "train_samples_after_purge": int(len(train_idx)),
+                        "test_samples": int(len(test_idx)),
+                        "first_test_source_position": first_test_position,
+                        "accuracy": accuracy,
+                        "balanced_accuracy": balanced_accuracy,
+                        "brier_score_buy_probability": brier,
+                    })
 
             mean_acc = float(np.mean(accuracies)) if accuracies else 0.50
+            mean_balanced_acc = float(np.mean(balanced_accuracies)) if balanced_accuracies else 0.50
+            mean_brier = float(np.mean(brier_scores)) if brier_scores else None
+            if len(fold_metrics) < 2:
+                log_operational_event("training_skipped", "ml_model", {
+                    "symbol": symbol,
+                    "reason": "insufficient_purged_validation_folds",
+                    "evaluated_folds": len(fold_metrics),
+                    "requested_folds": int(n_splits),
+                    "samples": int(len(X)),
+                    "label_horizon_bars": 15,
+                })
+                logger.warning(
+                    "[%s] Переобучение отменено: после очистки пересекающихся горизонтов осталось %s проверочных фолдов",
+                    symbol, len(fold_metrics),
+                )
+                return False
 
             # Обучаем финальную модель актива на всем массиве
             pipeline.fit(X, y)
@@ -418,10 +476,16 @@ class TradingMLModel:
                 "class_counts": {str(int(k)): int(v) for k, v in y.value_counts().items()},
                 "class_names": {"0": "SELL", "1": "BUY"},
                 "cross_validation": {
-                    "method": "TimeSeriesSplit",
+                    "method": "PurgedTimeSeriesSplit",
+                    "label_horizon_bars": 15,
                     "folds": int(n_splits),
+                    "evaluated_folds": len(fold_metrics),
                     "fold_accuracies": [float(value) for value in accuracies],
                     "mean_accuracy": float(mean_acc),
+                    "fold_metrics": fold_metrics,
+                    "mean_balanced_accuracy": mean_balanced_acc,
+                    "mean_brier_score_buy_probability": mean_brier,
+                    "interpretation": "Это качество направления BUY/SELL по свечной разметке; оно не является вероятностью прибыльной сделки или доходностью стратегии.",
                 },
                 "hyperparameters": {
                     "C": 0.8, "class_weight": "balanced", "max_iter": 1000,
@@ -433,12 +497,14 @@ class TradingMLModel:
             trained_at = datetime.now(timezone.utc).isoformat()
             snapshot_id = self.save_symbol_model(
                 symbol, pipeline, mean_acc, len(X), training_metadata=training_metadata,
-                trained_at=trained_at,
+                trained_at=trained_at, activate=activate,
             )
             try:
                 log_training_run(
                     samples_count=len(X), accuracy=mean_acc,
-                    notes=f"Индивидуальная модель {symbol}; snapshot_id={snapshot_id}; CV folds={n_splits}",
+                    notes=f"Индивидуальная модель {symbol}; snapshot_id={snapshot_id}; "
+                          f"status={'active' if activate else 'candidate'}; "
+                          f"purged CV folds={len(fold_metrics)}",
                 )
             except Exception as log_error:
                 # The exact model artifact was already committed; a secondary summary row
@@ -447,7 +513,11 @@ class TradingMLModel:
                                  symbol, snapshot_id, log_error)
             log_operational_event("training_succeeded", "ml_model", {
                 "symbol": symbol, "snapshot_id": snapshot_id, "samples": int(len(X)),
-                "cv_accuracy": mean_acc, "fold_accuracies": [float(value) for value in accuracies],
+                "snapshot_status": "active" if activate else "candidate",
+                "cv_accuracy": mean_acc, "cv_balanced_accuracy": mean_balanced_acc,
+                "cv_brier_score_buy_probability": mean_brier,
+                "fold_accuracies": [float(value) for value in accuracies],
+                "fold_metrics": fold_metrics,
                 "started_at": training_started_at, "finished_at": trained_at,
             })
 

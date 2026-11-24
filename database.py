@@ -368,6 +368,22 @@ def init_db():
                 artifact {artifact_type} NOT NULL
             )
         """)
+        if IS_POSTGRES:
+            cursor.execute("ALTER TABLE model_snapshots ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
+        else:
+            cursor.execute("PRAGMA table_info(model_snapshots)")
+            model_snapshot_cols = [row[1] for row in cursor.fetchall()]
+            if "is_active" not in model_snapshot_cols:
+                cursor.execute("ALTER TABLE model_snapshots ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        # Older databases mark every historical snapshot active after migration;
+        # retain only the newest active version per symbol, leaving candidates untouched.
+        cursor.execute("""
+            UPDATE model_snapshots SET is_active = FALSE
+            WHERE is_active = TRUE
+              AND id NOT IN (
+                  SELECT MAX(id) FROM model_snapshots WHERE is_active = TRUE GROUP BY symbol
+              )
+        """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_snapshots_symbol_id ON model_snapshots (symbol, id)")
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS runtime_logs (
@@ -436,6 +452,8 @@ def log_candle_analysis(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     with get_db() as cursor:
+        if is_active:
+            cursor.execute(_adapt_sql("UPDATE model_snapshots SET is_active = FALSE WHERE symbol = ?"), (str(symbol),))
         cursor.execute(sql, (
             datetime.utcnow().isoformat(),
             str(symbol),
@@ -1241,13 +1259,14 @@ def save_model_snapshot(
     metadata: Dict[str, Any],
     artifact_sha256: str,
     artifact: bytes,
+    is_active: bool = True,
 ) -> int:
-    """Persist both the exact model artifact and a human-readable weight snapshot."""
+    """Persist an active model or an unpromoted candidate with its exact artifact."""
     sql = _adapt_sql("""
         INSERT INTO model_snapshots (
             symbol, captured_at, trained_at, accuracy, samples_count,
-            features_json, weights_json, metadata_json, artifact_sha256, artifact
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            features_json, weights_json, metadata_json, artifact_sha256, artifact, is_active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     with get_db() as cursor:
         cursor.execute(sql, (
@@ -1256,7 +1275,7 @@ def save_model_snapshot(
             json.dumps(features, ensure_ascii=False),
             json.dumps(weights, ensure_ascii=False, default=str, allow_nan=False),
             json.dumps(metadata, ensure_ascii=False, default=str, allow_nan=False),
-            str(artifact_sha256), bytes(artifact),
+            str(artifact_sha256), bytes(artifact), bool(is_active),
         ))
         if IS_POSTGRES:
             cursor.execute("SELECT LASTVAL() AS id")
@@ -1280,13 +1299,13 @@ def _decode_model_snapshot(row: Dict[str, Any], include_artifact: bool = False) 
 
 
 def get_latest_model_snapshots(include_artifact: bool = True) -> List[Dict[str, Any]]:
-    """Return the newest durable model version for each symbol."""
+    """Return the currently active durable model for each symbol."""
     artifact_column = ", s.artifact" if include_artifact else ""
     sql = f"""
         SELECT s.id, s.symbol, s.captured_at, s.trained_at, s.accuracy, s.samples_count,
-               s.features_json, s.weights_json, s.metadata_json, s.artifact_sha256{artifact_column}
+               s.features_json, s.weights_json, s.metadata_json, s.artifact_sha256, s.is_active{artifact_column}
         FROM model_snapshots s
-        JOIN (SELECT symbol, MAX(id) AS latest_id FROM model_snapshots GROUP BY symbol) latest
+        JOIN (SELECT symbol, MAX(id) AS latest_id FROM model_snapshots WHERE is_active = TRUE GROUP BY symbol) latest
           ON latest.latest_id = s.id
         ORDER BY s.id ASC
     """
@@ -1298,7 +1317,7 @@ def get_latest_model_snapshots(include_artifact: bool = True) -> List[Dict[str, 
 def get_model_snapshots_history(symbol: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
     """Return inspectable model versions for Mini App diagnostics, excluding binary artifacts."""
     limit = max(1, min(int(limit), 500))
-    selection = "id, symbol, captured_at, trained_at, accuracy, samples_count, features_json, weights_json, metadata_json, artifact_sha256"
+    selection = "id, symbol, captured_at, trained_at, accuracy, samples_count, features_json, weights_json, metadata_json, artifact_sha256, is_active"
     with get_db() as cursor:
         if symbol:
             sql = _adapt_sql(f"SELECT {selection} FROM model_snapshots WHERE symbol = ? ORDER BY id DESC LIMIT ?")
@@ -1310,6 +1329,20 @@ def get_model_snapshots_history(symbol: Optional[str] = None, limit: int = 100) 
     return rows
 
 
+def activate_model_snapshot(snapshot_id: int) -> Optional[str]:
+    """Make a reviewed model snapshot active for its symbol, preserving all history."""
+    with get_db() as cursor:
+        cursor.execute(_adapt_sql("SELECT symbol FROM model_snapshots WHERE id = ?"), (int(snapshot_id),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        symbol = str(row["symbol"])
+        cursor.execute(_adapt_sql("UPDATE model_snapshots SET is_active = FALSE WHERE symbol = ?"), (symbol,))
+        cursor.execute(_adapt_sql("UPDATE model_snapshots SET is_active = TRUE WHERE id = ?"), (int(snapshot_id),))
+    log_operational_event("model_snapshot_activated", "user", {"symbol": symbol, "snapshot_id": int(snapshot_id)})
+    return symbol
+
+
 def get_model_snapshots_by_ids(snapshot_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     """Load report-safe model metadata and weights for the referenced snapshots."""
     ids = sorted({int(snapshot_id) for snapshot_id in snapshot_ids if snapshot_id is not None})
@@ -1318,7 +1351,7 @@ def get_model_snapshots_by_ids(snapshot_ids: List[int]) -> Dict[int, Dict[str, A
     placeholders = ",".join("?" for _ in ids)
     sql = _adapt_sql(f"""
         SELECT id, symbol, captured_at, trained_at, accuracy, samples_count,
-               features_json, weights_json, metadata_json, artifact_sha256
+               features_json, weights_json, metadata_json, artifact_sha256, is_active
         FROM model_snapshots WHERE id IN ({placeholders})
     """)
     with get_db() as cursor:

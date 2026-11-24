@@ -212,13 +212,29 @@ def normalize_score(raw_score: float, n_articles: int) -> float:
 
 # ─── Источник 1: Finnhub ─────────────────────────────────────────────────────
 
-def _fetch_finnhub_sentiment(symbol: str) -> Optional[float]:
-    """
-    Получает готовый sentiment score от Finnhub Market News API.
-    Finnhub возвращает предобработанный sentiment для финансовых новостей.
-    Бесплатный тариф: 60 запросов/минуту.
-    Возвращает скор в [-1.0, +1.0] или None при ошибке.
-    """
+def _scored_articles(articles: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the exact scored headlines and source metadata used for one sentiment result."""
+    scored = []
+    for article in articles:
+        headline = str(article.get("headline") or "").strip()
+        text = str(article.get("score_text") or headline).strip()
+        if not text:
+            continue
+        scored.append({
+            "headline": headline[:300],
+            "score_text_excerpt": text[:400],
+            "published_at": article.get("published_at"),
+            "url": str(article.get("url") or "")[:1000],
+            "score": float(score_headline(text)),
+        })
+    if not scored:
+        return None
+    raw = sum(item["score"] for item in scored)
+    return {"score": normalize_score(raw, len(scored)), "articles": scored, "article_count": len(scored)}
+
+
+def _fetch_finnhub_news(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch and return the same Finnhub articles that are scored and logged."""
     if not FINNHUB_API_KEY:
         return None
 
@@ -252,22 +268,23 @@ def _fetch_finnhub_sentiment(symbol: str) -> Optional[float]:
         relevant_keywords = keywords_map.get(symbol, [symbol.lower()])
 
         relevant_articles = []
-        for article in articles[:20]:  # первые 20 новостей
+        for article in articles[:20]:
             headline = (article.get("headline", "") + " " + article.get("summary", "")).lower()
             if any(kw in headline for kw in relevant_keywords):
-                relevant_articles.append(article.get("headline", ""))
+                relevant_articles.append(article)
 
         if not relevant_articles:
-            # Fallback: берём первые 8 статей категории без фильтра по теме
-            relevant_articles = [a.get("headline", "") for a in articles[:8]]
+            relevant_articles = articles[:8]
 
-        if not relevant_articles:
-            return None
-
-        raw = sum(score_headline(h) for h in relevant_articles)
-        score = normalize_score(raw, len(relevant_articles))
-        logger.info(f"[Finnhub] {symbol}: {len(relevant_articles)} статей, raw={raw:.2f}, score={score:.2f}")
-        return score
+        result = _scored_articles([{
+            "headline": article.get("headline", ""),
+            "score_text": article.get("headline", ""),  # Keep the original headline-only scoring behavior.
+            "published_at": article.get("datetime"),
+            "url": article.get("url", ""),
+        } for article in relevant_articles])
+        if result:
+            logger.info("[Finnhub] %s: %s статей, score=%.2f", symbol, result["article_count"], result["score"])
+        return result
 
     except Exception as e:
         logger.warning(f"Ошибка Finnhub для {symbol}: {e}")
@@ -276,12 +293,8 @@ def _fetch_finnhub_sentiment(symbol: str) -> Optional[float]:
 
 # ─── Источник 2: NewsAPI ─────────────────────────────────────────────────────
 
-def _fetch_newsapi_sentiment(symbol: str) -> Optional[float]:
-    """
-    Получает новости из NewsAPI.org (финансовые издания: Reuters, Bloomberg, FT, WSJ).
-    Бесплатный план: 100 запросов/день. Кэш 15 мин → ~64 запроса/день для 6 активов.
-    Возвращает скор в [-1.0, +1.0] или None при ошибке.
-    """
+def _fetch_newsapi_news(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch and return the exact NewsAPI articles used for the sentiment score."""
     if not NEWS_API_KEY:
         return None
 
@@ -309,15 +322,15 @@ def _fetch_newsapi_sentiment(symbol: str) -> Optional[float]:
         if not articles:
             return None
 
-        headlines = [
-            (a.get("title", "") + ". " + (a.get("description", "") or ""))
-            for a in articles[:10]
-        ]
-
-        raw = sum(score_headline(h) for h in headlines)
-        score = normalize_score(raw, len(headlines))
-        logger.info(f"[NewsAPI] {symbol}: {len(headlines)} статей, raw={raw:.2f}, score={score:.2f}")
-        return score
+        result = _scored_articles([{
+            "headline": article.get("title", ""),
+            "score_text": (article.get("title", "") + ". " + (article.get("description", "") or "")),
+            "published_at": article.get("publishedAt"),
+            "url": article.get("url", ""),
+        } for article in articles[:10]])
+        if result:
+            logger.info("[NewsAPI] %s: %s статей, score=%.2f", symbol, result["article_count"], result["score"])
+        return result
 
     except Exception as e:
         logger.warning(f"Ошибка NewsAPI для {symbol}: {e}")
@@ -326,17 +339,13 @@ def _fetch_newsapi_sentiment(symbol: str) -> Optional[float]:
 
 # ─── Источник 3: Google RSS (резервный) ─────────────────────────────────────
 
-def _fetch_rss_sentiment(symbol: str) -> float:
-    """
-    Резервный источник: Google News RSS.
-    Использует улучшенный NLP с учётом контекста и отрицаний.
-    Возвращает скор в [-1.0, +1.0].
-    """
+def _fetch_rss_news(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch and return the exact Google News RSS items used for the score."""
     query = RSS_QUERIES.get(symbol, f"{symbol} price")
     encoded_query = urllib.parse.quote(f"{query} when:1d")
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
 
-    headlines = []
+    articles = []
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible)"})
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -344,23 +353,25 @@ def _fetch_rss_sentiment(symbol: str) -> float:
             for item in root.findall(".//item")[:10]:
                 title_elem = item.find("title")
                 desc_elem = item.find("description")
-                text = ""
-                if title_elem is not None and title_elem.text:
-                    text += title_elem.text
-                if desc_elem is not None and desc_elem.text:
-                    text += ". " + desc_elem.text
+                title = title_elem.text if title_elem is not None and title_elem.text else ""
+                description = desc_elem.text if desc_elem is not None and desc_elem.text else ""
+                link_elem = item.find("link")
+                date_elem = item.find("pubDate")
+                text = (title + ". " + description).strip()
                 if text:
-                    headlines.append(text)
+                    articles.append({
+                        "headline": title,
+                        "score_text": text,
+                        "published_at": date_elem.text if date_elem is not None else None,
+                        "url": link_elem.text if link_elem is not None else "",
+                    })
     except Exception as e:
         logger.warning(f"Ошибка Google RSS для {symbol}: {e}")
 
-    if not headlines:
-        return 0.0
-
-    raw = sum(score_headline(h) for h in headlines)
-    score = normalize_score(raw, len(headlines))
-    logger.info(f"[Google RSS] {symbol}: {len(headlines)} статей, raw={raw:.2f}, score={score:.2f}")
-    return score
+    result = _scored_articles(articles[:10])
+    if result:
+        logger.info("[Google RSS] %s: %s статей, score=%.2f", symbol, result["article_count"], result["score"])
+    return result
 
 
 # ─── Экономический календарь (жёсткое расписание) ───────────────────────────
@@ -412,13 +423,8 @@ def fetch_news_sentiment(symbol: str) -> Dict[str, Any]:
       2. NewsAPI (если задан NEWS_API_KEY)
       3. Google News RSS (всегда доступен как fallback)
 
-    Возвращает:
-        score       float  [-1.0, +1.0]
-        label       str    текстовая метка
-        top_headline str   свежий заголовок
-        source      str    использованный источник
-        shield_active bool
-        shield_reason str
+    Помимо итогового score сохраняет точные заголовки, даты и ссылки, вошедшие в оценку.
+    Заголовок для карточки берётся из этой же выборки, без отдельного повторного запроса.
     """
     now = time.time()
 
@@ -426,41 +432,36 @@ def fetch_news_sentiment(symbol: str) -> Dict[str, Any]:
     if symbol in _news_cache:
         cached_time, cached_data = _news_cache[symbol]
         if now - cached_time < CACHE_TTL_SECONDS:
-            return cached_data
+            result = dict(cached_data)
+            result["cache_hit"] = True
+            result["cache_age_seconds"] = round(now - cached_time, 1)
+            # Calendar windows are time-sensitive and must not be served stale from the news cache.
+            result["shield_active"], result["shield_reason"] = check_economic_calendar_shield(symbol)
+            return result
 
-    score: Optional[float] = None
-    source = "google_rss"
-    top_headline = "Рыночный фон стабилен"
-
-    # ── Уровень 1: Finnhub ──
+    source_fetchers = []
     if FINNHUB_API_KEY:
-        score = _fetch_finnhub_sentiment(symbol)
-        if score is not None:
-            source = "finnhub"
-            logger.info(f"[{symbol}] Новостной сантимент: Finnhub score={score:.2f}")
+        source_fetchers.append(("finnhub", _fetch_finnhub_news))
+    if NEWS_API_KEY:
+        source_fetchers.append(("newsapi", _fetch_newsapi_news))
+    source_fetchers.append(("google_rss", _fetch_rss_news))
 
-    # ── Уровень 2: NewsAPI ──
-    if score is None and NEWS_API_KEY:
-        score = _fetch_newsapi_sentiment(symbol)
-        if score is not None:
-            source = "newsapi"
-            logger.info(f"[{symbol}] Новостной сантимент: NewsAPI score={score:.2f}")
+    source = "unavailable"
+    scored_news: Dict[str, Any] = {}
+    for source_name, fetcher in source_fetchers:
+        try:
+            scored_news = fetcher(symbol) or {}
+        except Exception as exc:
+            logger.warning("Не удалось получить новости из %s для %s: %s", source_name, symbol, exc)
+            scored_news = {}
+        if scored_news.get("articles"):
+            source = source_name
+            break
 
-    # ── Уровень 3: Google RSS ──
-    if score is None:
-        score = _fetch_rss_sentiment(symbol)
-        source = "google_rss"
-        logger.info(f"[{symbol}] Новостной сантимент: Google RSS score={score:.2f}")
-
-    # Гарантия валидного float
-    if score is None:
-        score = 0.0
-
-    # Получаем свежий заголовок для отображения в Telegram
-    try:
-        top_headline = _get_top_headline(symbol, source)
-    except Exception:
-        pass
+    score = float(scored_news.get("score", 0.0))
+    articles = list(scored_news.get("articles") or [])
+    # The displayed headline now comes from the same article set used by sentiment scoring.
+    top_headline = str(articles[0].get("headline") or "Рыночный фон стабилен") if articles else "Нет доступных новостных заголовков"
 
     # Текстовая метка с источником
     source_icons = {"finnhub": "🔵", "newsapi": "📡", "google_rss": "🌐"}
@@ -474,65 +475,23 @@ def fetch_news_sentiment(symbol: str) -> Dict[str, Any]:
         label = f"⚪ Нейтральный {src_icon}"
 
     shield_active, shield_reason = check_economic_calendar_shield(symbol)
+    fetched_at_utc = datetime.now(timezone.utc).isoformat()
+    now = time.time()
 
     result = {
         "score":         score,
         "label":         label,
         "top_headline":  top_headline,
         "source":        source,
+        "fetched_at_utc": fetched_at_utc,
+        "cache_hit":     False,
+        "cache_age_seconds": 0.0,
+        "article_count": int(scored_news.get("article_count", len(articles))),
+        "articles":      articles,
+        "news_available": bool(articles),
         "shield_active": shield_active,
         "shield_reason": shield_reason,
     }
 
     _news_cache[symbol] = (now, result)
     return result
-
-
-def _get_top_headline(symbol: str, source: str) -> str:
-    """Получает свежий заголовок для отображения в сигнале Telegram."""
-    if source in ("finnhub",) and FINNHUB_API_KEY:
-        try:
-            import requests
-            category = FINNHUB_CATEGORIES.get(symbol, "general")
-            url = f"https://finnhub.io/api/v1/news?category={category}&token={FINNHUB_API_KEY}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                articles = resp.json()
-                if articles:
-                    return articles[0].get("headline", "Рыночный фон стабилен")
-        except Exception:
-            pass
-
-    if source == "newsapi" and NEWS_API_KEY:
-        try:
-            import requests
-            query = NEWSAPI_QUERIES.get(symbol, symbol)
-            url = (
-                f"https://newsapi.org/v2/everything"
-                f"?q={urllib.parse.quote(query)}&language=en&sortBy=publishedAt&pageSize=1"
-                f"&domains=reuters.com,bloomberg.com,cnbc.com"
-                f"&apiKey={NEWS_API_KEY}"
-            )
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                articles = resp.json().get("articles", [])
-                if articles:
-                    return articles[0].get("title", "Рыночный фон стабилен")
-        except Exception:
-            pass
-
-    # Google RSS fallback
-    try:
-        query = RSS_QUERIES.get(symbol, f"{symbol} price")
-        encoded = urllib.parse.quote(f"{query} when:1d")
-        url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible)"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            root = ET.fromstring(resp.read())
-            item = root.find(".//item/title")
-            if item is not None and item.text:
-                return item.text
-    except Exception:
-        pass
-
-    return "Рыночный фон стабилен"

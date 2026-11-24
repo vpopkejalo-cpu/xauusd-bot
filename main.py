@@ -619,7 +619,13 @@ def main():
                                             "score": float(news_info.get("score", 0.0)),
                                             "label": str(news_info.get("label", "Neutral")),
                                             "top_headline": str(news_info.get("top_headline", "")),
-                                            "source": str(news_info.get("source", ""))
+                                            "source": str(news_info.get("source", "")),
+                                            "fetched_at_utc": news_info.get("fetched_at_utc"),
+                                            "cache_hit": bool(news_info.get("cache_hit", False)),
+                                            "cache_age_seconds": _finite_number(news_info.get("cache_age_seconds")),
+                                            "article_count": int(news_info.get("article_count", 0)),
+                                            "news_available": bool(news_info.get("news_available", False)),
+                                            "articles": news_info.get("articles", []),
                                         },
                                         "risk": {
                                             "entry_price": float(levels["entry_price"]),
@@ -722,28 +728,31 @@ def main():
                 trigger_reason = "по вашему запросу из Telegram" if manual_request else f"плановое (каждые {RETRAIN_INTERVAL_HOURS} ч)"
                 logger.info(f"Запуск индивидуального самообучения моделей ({trigger_reason})...")
 
-                retrained_count = 0
+                candidate_count = 0
                 for s in SYMBOLS:
                     try:
                         c_df = fetcher.fetch_time_series(symbol=s, outputsize=TRAINING_CANDLES_COUNT)
                         if not c_df.empty:
                             save_candles(c_df, symbol=s)
                             fresh_with_ind = calculate_indicators(c_df, atr_period=ATR_PERIOD)
-                            if ml_model.train(fresh_with_ind, symbol=s):
-                                retrained_count += 1
+                            if ml_model.train(fresh_with_ind, symbol=s, activate=False):
+                                candidate_count += 1
                         time.sleep(1)
                     except Exception as ex:
                         logger.warning(f"[{s}] Ошибка обновления модели: {ex}")
 
-                if retrained_count > 0:
+                if candidate_count > 0:
                     try:
-                        notifier.send_retrain_notification(retrained_count * TRAINING_CANDLES_COUNT, ml_model.last_accuracy)
+                        notifier.send_retrain_notification(candidate_count, ml_model.last_accuracy, activated=False)
                     except Exception:
                         pass
-                    last_retrain_time = time.time()
+                # Also back off after a failed/insufficient-data attempt; otherwise
+                # the scheduled path would retry the entire training batch every loop.
+                last_retrain_time = time.time()
                 log_operational_event("retraining_batch_finished", "main", {
                     "trigger": trigger_reason, "requested_symbols": list(SYMBOLS),
-                    "successful_symbols": int(retrained_count),
+                    "candidate_symbols": int(candidate_count),
+                    "active_models_changed": False,
                 })
 
         except Exception as e:
