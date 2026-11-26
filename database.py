@@ -452,8 +452,6 @@ def log_candle_analysis(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     with get_db() as cursor:
-        if is_active:
-            cursor.execute(_adapt_sql("UPDATE model_snapshots SET is_active = FALSE WHERE symbol = ?"), (str(symbol),))
         cursor.execute(sql, (
             datetime.utcnow().isoformat(),
             str(symbol),
@@ -1269,6 +1267,8 @@ def save_model_snapshot(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """)
     with get_db() as cursor:
+        if is_active:
+            cursor.execute(_adapt_sql("UPDATE model_snapshots SET is_active = FALSE WHERE symbol = ?"), (str(symbol),))
         cursor.execute(sql, (
             str(symbol), datetime.utcnow().isoformat(), trained_at,
             float(accuracy), int(samples_count),
